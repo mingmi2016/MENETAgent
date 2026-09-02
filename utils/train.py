@@ -3,7 +3,31 @@ import copy
 from datetime import datetime
 from sklearn.metrics import r2_score
 import numpy as np
+import json
+from pathlib import Path
 from utils.ig import ig_analysis
+
+
+def _write_progress(config, phase, current_epoch, total_epochs, metrics):
+    output = Path(config.get("model_path", "save"))
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / "progress.json"
+    temporary = output / "progress.json.tmp"
+    payload = {
+        "phase": phase,
+        "current_epoch": current_epoch,
+        "total_epochs": total_epochs,
+        "percent": round(current_epoch / total_epochs * 100, 1),
+        "metrics": metrics,
+        "updated_at": datetime.now().astimezone().isoformat(),
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, default=float), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _raise_if_cancelled(config):
+    if (Path(config.get("model_path", "save")) / "cancel.requested").is_file():
+        raise InterruptedError("任务已由用户取消")
 
 def setup_training_env(config, model, criterion):
     device = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
@@ -43,6 +67,7 @@ def train_trait_specific_encoder(config, model, train_loader, val_loader, criter
     best_val_loss=float('inf')
     best_model = copy.deepcopy(model)
     for epoch in range(config['epoch']):
+        _raise_if_cancelled(config)
         train_trait_specific_encoder_one_epoch(model, train_loader, optimizer, criterion, device)
         train_loss = evaluate_trait_specific_encoder(model, train_loader, criterion, device)
         val_loss = evaluate_trait_specific_encoder(model, val_loader, criterion, device)
@@ -50,6 +75,9 @@ def train_trait_specific_encoder(config, model, train_loader, val_loader, criter
         print(f"[Epoch {epoch + 1:03d}] "
               f"Train Loss: {train_loss:.4f} "
               f"Val Loss: {val_loss:.4f} ")
+        _write_progress(config, "training_encoder", epoch + 1, config["epoch"], {
+            "train_loss": train_loss, "val_loss": val_loss,
+        })
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -95,7 +123,9 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
     device, optimizer, scheduler = setup_training_env(config, model, criterion)
     best_val_r2=float('-inf')
     best_model = copy.deepcopy(model)
+    history = []
     for epoch in range(config['epoch']):
+        _raise_if_cancelled(config)
         train_menet_one_epoch(model, train_loader, optimizer, criterion, device)
         train_loss, train_r2, _, _ = evaluate_menet(model, train_loader, criterion, device)
         val_loss, val_r2, _, _ = evaluate_menet(model, val_loader, criterion, device)
@@ -104,12 +134,32 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
         print(f"train_loss = {train_loss:.4f}, train_r2 = {train_r2:.4f}, "
               f"val_loss = {val_loss:.4f}, val_r2 = {val_r2:.4f}, "
               f"ig_VE = {ig_ve:.4f}, ig_RepGeno={ig_repgeno:.4f}")
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_r2": train_r2,
+                        "val_loss": val_loss, "val_r2": val_r2, "ig_ve": ig_ve,
+                        "ig_repgeno": ig_repgeno})
+        _write_progress(config, "training_menet", epoch + 1, config["epoch"], history[-1])
 
         if val_r2 > best_val_r2:
             best_val_r2 = val_r2
             best_model = copy.deepcopy(model)
     test_loss, test_r2, _, _ = evaluate_menet(best_model, test_loader, criterion, device)
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [INFO] Best model achieved R² = {test_r2:.4f} on the test set.")
+    output_dir = Path(config.get("model_path", "save"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "menet_model.pt"
+    history_path = output_dir / "training_history.json"
+    metrics_path = output_dir / "metrics.json"
+    predictions_path = output_dir / "test_predictions.csv"
+    torch.save(best_model.state_dict(), model_path)
+    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, default=float), encoding="utf-8")
+    _, _, predictions, truths = evaluate_menet(best_model, test_loader, criterion, device)
+    np.savetxt(predictions_path, np.column_stack((truths, predictions)), delimiter=",",
+               header="true,predicted", comments="")
+    metrics = {"test_loss": float(test_loss), "test_r2": float(test_r2),
+               "device": str(device), "epochs": int(config["epoch"]),
+               "artifacts": [str(model_path), str(history_path), str(metrics_path), str(predictions_path)]}
+    metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2, default=float), encoding="utf-8")
+    return metrics
 
 if __name__ == '__main__':
     pass

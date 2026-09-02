@@ -1,0 +1,60 @@
+{
+  "measured_at": "2026-09-02",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5060",
+    "gpu_memory_mib": 8151,
+    "driver": "595.95",
+    "python": "3.12.3",
+    "torch": "2.13.0+cu130"
+  },
+  "benchmarks": [
+    {
+      "dataset_dir": "data/demo/demo_rice_plant_height",
+      "trait": "plant_height",
+      "samples": 357,
+      "snps": 1311,
+      "intent": "train_model",
+      "device": "cuda",
+      "epochs": 50,
+      "explain_snp": false,
+      "execution_seconds": 43,
+      "task_id": "task_6b7005fa89ad"
+    },
+    {
+      "dataset_dir": "data/demo/demo_rice_flowering_arkansas",
+      "trait": "flowering_arkansas",
+      "samples": 349,
+      "snps": 1311,
+      "intent": "train_model",
+      "device": "cuda",
+      "epochs": 50,
+      "explain_snp": false,
+      "execution_seconds": 41,
+      "task_id": "task_1beeebc8f5e9"
+    },
+    {
+      "dataset_dir": "data/demo/demo_wheat_yield_env1",
+      "trait": "grain_yield_env1",
+      "samples": 599,
+      "snps": 1279,
+      "intent": "train_model",
+      "device": "cuda",
+      "epochs": 50,
+      "explain_snp": false,
+      "execution_seconds": 74,
+      "task_id": "task_7ec2d8073d8f"
+    },
+    {
+      "dataset_dir": "data/demo/demo_wheat_yield_env2",
+      "trait": "grain_yield_env2",
+      "samples": 599,
+      "snps": 1279,
+      "intent": "train_model",
+      "device": "cuda",
+      "epochs": 50,
+      "explain_snp": false,
+      "execution_seconds": 75,
+      "task_id": "task_a61c56894422"
+    }
+  ]
+}

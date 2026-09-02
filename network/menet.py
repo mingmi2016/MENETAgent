@@ -32,7 +32,7 @@ class VE(nn.Module):
         super(VE, self).__init__()
         self.resnet = nn.Sequential(
             nn.Conv1d(1, config["conv"][0],
-                      kernel_size=config["conv"][1], padding=config["conv"][1]//2,
+                      kernel_size=config["conv"][1], padding=config["conv"][1] // 2,
                       stride=config["conv"][2]),
             ResNet(config["conv"][0], config["res1"][0], config["res1"][1], config["res1"][2]),
             ResNet(config["res1"][0], config["res2"][0], config["res2"][1], config["res2"][2])
@@ -40,7 +40,7 @@ class VE(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool1d(config["adaptive"])
         self.linear = nn.Sequential(
             nn.Flatten(),
-            nn.Linear((snp_size+config["conv"][2]-(1 if config["conv"][1]%2else 0))//(config["conv"][2]*config["res1"][2]*config["res2"][2])*config["adaptive"],
+            nn.Linear((snp_size + config["conv"][2] - (1 if config["conv"][1] % 2 else 0)) // (config["conv"][2] * config["res1"][2] * config["res2"][2]) * config["adaptive"],
                       config["embedding_dim"][0]),
             nn.BatchNorm1d(config["embedding_dim"][0]),
             nn.LeakyReLU(negative_slope=0.05),
@@ -94,8 +94,8 @@ class MultiChrInformationFeatureFusion(nn.Module):
         super(MultiChrInformationFeatureFusion, self).__init__()
         self.windows = windows
         self.dim = dim
-        self.f_ve = [CrossInformationFeatureFusion(dim) for _ in range(len(windows))]
-        self.f_repGeno = [CrossInformationFeatureFusion(dim) for _ in range(len(windows))]
+        self.f_ve = nn.ModuleList([CrossInformationFeatureFusion(dim) for _ in range(len(windows))])
+        self.f_repGeno = nn.ModuleList([CrossInformationFeatureFusion(dim) for _ in range(len(windows))])
         self.transfer_ve = nn.Linear(dim * len(windows), dim)
         self.transfer_RepGeno = nn.Linear(dim * len(windows), dim)
 
@@ -150,9 +150,9 @@ class MeNet(nn.Module):
         self.windows = windows
 
         if self.windows:
-            self.ve = []
-            for i in range(len(windows)):
-                self.ve.append(VE(windows[f'{i+1}'], config["VE"]))
+            self.ve = nn.ModuleList([
+                VE(windows[f'{i + 1}'], config["VE"]) for i in range(len(windows))
+            ])
             self.fusion = Fusion(config["output"], self.windows)
         else:
             self.ve = VE(snp_size, config["VE"])
@@ -165,7 +165,6 @@ class MeNet(nn.Module):
         if self.windows:
             x = torch.split(x, list(self.windows.values()), dim=-1)
             x = torch.stack([self.ve[i](x[i]) for i in range(len(self.windows))], dim=0)
-            print(x.shape)
         else:
             x = self.ve(x)
         output = self.fusion(x, y)

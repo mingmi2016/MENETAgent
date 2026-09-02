@@ -5,6 +5,7 @@
   "margin" : 0.1,
   "epoch" : 5,
   "batch_size" : 32,
+  "flag" : 0,
   "model_path" :"save",
-  "gr_path" : "save",
+  "gr_path" : "save"
 }

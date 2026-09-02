@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+runs/
+uploads/
+
+# Generated training artifacts
+save/*.pt
+save/*.pth
