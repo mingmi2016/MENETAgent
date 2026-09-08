@@ -1,0 +1,11 @@
+-r ../MENET/requirements.txt
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+celery==5.5.3
+redis==6.4.0
+pytest==9.1.1
+mcp>=1.12,<2
+starlette>=0.40,<0.42
+sse-starlette>=1.6,<3

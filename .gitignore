@@ -1,10 +1,11 @@
 .venv/
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.log
-runs/
-uploads/
+agent_app/runs/
+agent_app/uploads/
 
 # Generated training artifacts
-save/*.pt
-save/*.pth
+MENET/save/*.pt
+MENET/save/*.pth

@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: menet-core
+Version: 0.1.0
+Summary: Mixed-effects deep neural network for multi-environment agronomic trait prediction
+Requires-Python: >=3.10
+License-File: LICENCE.txt
+Requires-Dist: numpy==1.26.4
+Requires-Dist: openpyxl==3.1.5
+Requires-Dist: pandas==2.2.2
+Requires-Dist: scikit-learn==1.5.2
+Requires-Dist: scipy==1.13.1
+Requires-Dist: torch==2.13.0
+Dynamic: license-file
