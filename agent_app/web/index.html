@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MENET Agent</title>
-  <link rel="stylesheet" href="/app/style.css?v=20260908-3">
+  <link rel="stylesheet" href="/app/style.css?v=20260908-5">
 </head>
 <body>
   <header class="topbar">
@@ -36,21 +36,23 @@
         <form id="chat-form" class="composer"><textarea id="message" rows="2" placeholder="例如：请训练当前水稻株高数据，使用 GPU，训练 50 轮" required></textarea><button class="send-button" title="发送">发送 <span>-></span></button></form>
       </article>
       <aside class="context-column">
-        <article id="llm-panel" class="panel context-panel">
-          <div class="panel-heading"><div><p class="kicker">AI MODEL</p><h3>语言模型</h3></div><label class="switch-label"><input id="llm-enabled" type="checkbox"><span>启用</span></label></div>
+        <details id="llm-panel" class="panel context-panel">
+          <summary class="context-summary"><div><p class="kicker">AI MODEL</p><h3>模型服务</h3></div><span id="llm-panel-summary" class="panel-summary">规则模式</span></summary>
+          <div class="context-panel-body">
+          <label class="switch-label panel-toggle"><input id="llm-enabled" type="checkbox"><span>启用模型服务</span></label>
           <form id="llm-form">
             <label>服务类型<select id="llm-provider"><option value="ollama">本地 Ollama</option><option value="compatible_auto">第三方兼容服务（自动协议）</option><option value="anthropic_compatible">Anthropic-compatible</option><option value="openai_compatible">OpenAI-compatible</option></select></label>
             <label>服务地址<input id="llm-base-url" type="url" value="http://127.0.0.1:11434" required></label>
-            <label>意图识别模型<select id="llm-model"><option value="">请选择模型</option></select></label>
-            <label>结果分析模型<select id="llm-analysis-model"><option value="">请选择模型</option></select></label>
-            <label id="llm-api-key-row" class="hidden">API Key<input id="llm-api-key" type="password" autocomplete="off" placeholder="留空表示保持现有密钥"></label>
+            <label>当前使用模型<select id="llm-model"><option value="">请先测试连接</option></select></label>
+            <label id="llm-api-key-row" class="hidden">API Key<input id="llm-api-key" type="password" autocomplete="off" placeholder="请输入 API Key"></label>
             <div class="settings-actions"><button id="llm-refresh-models" class="button secondary" type="button">刷新模型</button><button id="llm-test" class="button secondary" type="button">测试连接</button><button class="button primary" type="submit">保存</button></div>
           </form>
           <div id="llm-result" class="inline-result hidden"></div>
-          <p class="field-help">意图模型负责理解请求，分析模型负责解释结果。Ollama 无需 API Key；关闭后使用规则解析。</p>
-        </article>
-        <article class="panel context-panel">
-          <div class="panel-heading"><div><p class="kicker">DATA CONTEXT</p><h3>当前数据</h3></div><span class="panel-index">CSV</span></div>
+          <p class="field-help">测试连接成功后选择一个可用模型。MENET 会使用同一个模型完成请求理解和结果解释；Ollama 无需 API Key。</p>
+          </div>
+        </details>
+        <details id="dataset-panel" class="panel context-panel">
+          <summary class="context-summary"><div><p class="kicker">DATA CONTEXT</p><h3>当前数据</h3></div><span id="dataset-panel-summary" class="panel-summary">未选择</span></summary>
           <label class="dataset-picker">选择数据集<select id="dataset-select"><option value="">请选择或上传数据</option></select></label>
           <div id="dataset-summary" class="dataset-summary empty">选择数据后将在这里显示物种、性状和规模。</div>
           <details id="dataset-inspection" class="foldout"><summary>数据详情与质量</summary><div id="dataset-inspection-result" class="dataset-summary empty">展开后检查样本匹配、缺失、重复和 SNP 格式。</div></details>
@@ -75,24 +77,25 @@
           <input id="dataset-dir" type="hidden" value="data">
           <input id="output-dir" type="hidden" value="runs">
           <p class="field-help">私人数据、会话和任务按研究档案隔离；示例数据对所有档案可见。</p>
-        </article>
-        <article class="panel context-panel">
-          <div class="panel-heading"><div><p class="kicker">MODEL LIBRARY</p><h3>训练模型</h3></div><span id="model-count" class="panel-index">0</span></div>
+        </details>
+        <details id="model-panel" class="panel context-panel">
+          <summary class="context-summary"><div><p class="kicker">MODEL LIBRARY</p><h3>训练模型</h3></div><span id="model-panel-summary" class="panel-summary">0 个模型</span></summary>
           <label>当前模型<select id="trained-model-select"><option value="">尚无训练模型</option></select></label>
           <div id="trained-model-summary" class="dataset-summary empty">完成一次训练后，模型会自动登记在这里。</div>
           <div class="model-actions"><button id="repeat-model" class="button secondary" type="button" disabled>重复验证</button><button id="rename-model" class="button secondary" type="button" disabled>重命名</button><button id="archive-model" class="icon-button danger" type="button" disabled>移出列表</button></div>
           <details class="comparison"><summary>同类训练对比</summary><div id="model-comparison" class="dataset-summary empty">至少需要一次有测试指标的训练。</div></details>
           <p class="field-help">预测、评估和解释将使用这里明确选择的模型。移出列表不会删除训练文件。</p>
-        </article>
-        <article class="panel context-panel">
-          <div class="panel-heading"><div><p class="kicker">HISTORY</p><h3>历史会话</h3></div><button id="refresh-history" class="icon-button" title="刷新会话历史">刷新</button></div>
+        </details>
+        <details id="history-panel" class="panel context-panel" open>
+          <summary class="context-summary"><div><p class="kicker">HISTORY</p><h3>历史会话</h3></div><span id="history-panel-summary" class="panel-summary">0 个会话</span></summary>
+          <div class="context-panel-heading"><span class="field-help">选择会话可恢复上下文</span><button id="refresh-history" class="icon-button" title="刷新会话历史" type="button">刷新</button></div>
           <div id="conversation-history" class="task-history"></div>
           <p class="field-help">每次新对话拥有独立上下文，点击即可切换并恢复。</p>
-        </article>
+        </details>
       </aside>
     </section>
   </main>
   <dialog id="task-confirm" class="confirm-dialog"><h3>确认开始长任务</h3><p id="confirm-summary"></p><p class="field-help">任务会在后台执行，可以离开页面后再从历史会话中查看。</p><div class="dialog-actions"><button id="cancel-run" class="button secondary" type="button">返回修改</button><button id="confirm-run" class="button primary" type="button">开始运行</button></div></dialog>
-  <script src="/app/app.js?v=20260908-4"></script>
+  <script src="/app/app.js?v=20260909-2"></script>
 </body>
 </html>

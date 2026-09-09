@@ -40,3 +40,27 @@
 .inline-result.error{border-left-color:#b65c5c;background:#fbecec;color:#863c3c}
 .model-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.model-actions .button,.model-actions .icon-button{justify-content:center;padding-left:8px;padding-right:8px;font-size:12px}.model-actions button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:680px){.llm-status{display:none}.settings-actions{grid-template-columns:1fr}.top-actions{gap:12px}}
+.context-panel{padding:0;overflow:hidden}
+.context-panel>summary{list-style:none}
+.context-panel>summary::-webkit-details-marker{display:none}
+.context-summary{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:22px;cursor:pointer;min-height:82px}
+.context-summary:hover{background:#f7faf6}
+.context-summary>div{min-width:0}
+.context-summary::after{content:"+";flex:0 0 auto;width:24px;height:24px;border:1px solid #cbd7ce;border-radius:4px;display:grid;place-items:center;color:#52705d;font-size:17px;line-height:1;font-weight:400}
+.context-panel[open]>.context-summary::after{content:"−"}
+.context-summary .kicker{margin-bottom:4px}
+.context-summary h3{font-size:17px}
+.panel-summary{flex:0 1 auto;max-width:48%;color:#718078;font-size:11px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.context-panel-body,.context-panel>form,.context-panel>label,.context-panel>.dataset-summary,.context-panel>.foldout,.context-panel>.model-actions,.context-panel>.comparison,.context-panel>.field-help,.context-panel>.inline-result,.context-panel>input{margin-left:22px;margin-right:22px}
+.context-panel-body{padding-bottom:22px}
+.context-panel>label:first-of-type{margin-top:0}
+.panel-toggle{margin-bottom:15px}
+.context-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 22px 12px;padding-top:0}
+.context-panel-heading .field-help{margin:0}
+.advanced-settings{border-top:1px solid #e3e9e3;padding-top:12px;margin-top:2px}
+.advanced-settings>summary{cursor:pointer;color:#315f4e;font-size:12px;font-weight:650;list-style:none}
+.advanced-settings>summary::-webkit-details-marker{display:none}
+.advanced-settings>summary::before{content:"+";display:inline-grid;place-items:center;width:17px;height:17px;margin-right:6px;border:1px solid #cbd7ce;border-radius:3px;font-size:13px;font-weight:400}
+.advanced-settings[open]>summary::before{content:"−"}
+.advanced-settings-body{display:grid;gap:15px;margin-top:14px}
+@media(max-width:560px){.context-summary{padding:18px}.context-panel-body,.context-panel>form,.context-panel>label,.context-panel>.dataset-summary,.context-panel>.foldout,.context-panel>.model-actions,.context-panel>.comparison,.context-panel>.field-help,.context-panel>.inline-result,.context-panel>input{margin-left:18px;margin-right:18px}.context-panel-heading{margin-left:18px;margin-right:18px}.panel-summary{max-width:42%;font-size:10px}}

@@ -288,10 +288,13 @@ async function checkHealth() {
 function updateLlmStatus(settings) {
   const active = settings.enabled && settings.mode === "llm";
   const status = $("llm-status");
+  const summary = $("llm-panel-summary");
   status.classList.toggle("active", active);
   status.querySelector(".dot").style.background = active ? "#86a63f" : "#e7ab55";
-  status.querySelector("span:last-child").textContent =
-    active ? (settings.provider === "ollama" ? "Ollama" : "LLM") + " · " + settings.intent_model : "规则模式";
+  const model = settings.model || settings.intent_model || "未选择模型";
+  const label = active ? (settings.provider === "ollama" ? "Ollama" : "模型服务") + " · " + model : "规则模式";
+  status.querySelector("span:last-child").textContent = label;
+  if (summary) summary.textContent = label;
 }
 
 function updateLlmProviderFields() {
@@ -304,25 +307,19 @@ async function loadLlmModels(selectedIntent = "", selectedAnalysis = "") {
   const provider = $("llm-provider").value;
   const baseUrl = $("llm-base-url").value.trim();
   const intentSelect = $("llm-model");
-  const analysisSelect = $("llm-analysis-model");
+  if (!intentSelect) return;
   const wantedIntent = selectedIntent || intentSelect.value;
-  const wantedAnalysis = selectedAnalysis || analysisSelect.value || wantedIntent;
-  [intentSelect, analysisSelect].forEach((select) => {
-    select.replaceChildren(new Option("正在读取模型...", ""));
-  });
+  intentSelect.replaceChildren(new Option("正在读取模型...", ""));
   try {
     const query = new URLSearchParams({ provider, base_url: baseUrl });
     const data = await request("/api/v1/settings/llm/models?" + query);
-    [[intentSelect, wantedIntent], [analysisSelect, wantedAnalysis]].forEach(([select, wanted]) => {
-      select.replaceChildren(new Option("请选择模型", ""));
-      data.models.forEach((model) => select.appendChild(new Option(model, model)));
-      if (wanted && !data.models.includes(wanted)) select.appendChild(new Option(wanted, wanted));
-      select.value = wanted || data.models[0] || "";
-    });
+    intentSelect.replaceChildren(new Option("请选择模型", ""));
+    data.models.forEach((model) => intentSelect.appendChild(new Option(model, model)));
+    if (wantedIntent && !data.models.includes(wantedIntent)) intentSelect.appendChild(new Option(wantedIntent, wantedIntent));
+    intentSelect.value = wantedIntent || data.models[0] || "";
     if (!data.models.length) showLlmResult("模型服务可以访问，但没有发现可用模型。", true);
   } catch (error) {
-    intentSelect.replaceChildren(new Option(wantedIntent || "未读取到模型", wantedIntent));
-    analysisSelect.replaceChildren(new Option(wantedAnalysis || "未读取到模型", wantedAnalysis));
+    intentSelect.replaceChildren(new Option(wantedIntent || "请先测试连接", wantedIntent));
     showLlmResult(error.message, true);
   }
 }
@@ -332,8 +329,10 @@ async function loadLlmSettings() {
   $("llm-enabled").checked = settings.enabled;
   $("llm-provider").value = settings.provider;
   $("llm-base-url").value = settings.base_url;
+  $("llm-api-key").value = "";
+  $("llm-api-key").placeholder = settings.api_key_masked || "请输入 API Key";
   updateLlmProviderFields();
-  await loadLlmModels(settings.intent_model, settings.analysis_model);
+  await loadLlmModels(settings.model || settings.intent_model, settings.analysis_model);
   updateLlmStatus(settings);
 }
 
@@ -344,7 +343,7 @@ async function saveLlmSettings() {
     base_url: $("llm-base-url").value.trim(),
     model: $("llm-model").value,
     intent_model: $("llm-model").value,
-    analysis_model: $("llm-analysis-model").value,
+    analysis_model: $("llm-model").value,
     api_key: $("llm-api-key").value.trim() || null,
   };
   const settings = await request("/api/v1/settings/llm", {
@@ -353,6 +352,7 @@ async function saveLlmSettings() {
     body: JSON.stringify(payload),
   });
   $("llm-api-key").value = "";
+  $("llm-api-key").placeholder = settings.api_key_masked || "请输入 API Key";
   updateLlmStatus(settings);
   return settings;
 }
@@ -407,6 +407,7 @@ function applySelectedModel() {
   if (!selectedModelId) {
     $("trained-model-summary").textContent = "完成一次训练后，模型会自动登记在这里。";
     $("trained-model-summary").classList.add("empty");
+    if (!$("model-panel-summary").textContent) $("model-panel-summary").textContent = "0 个模型";
     return;
   }
   const metrics = JSON.parse(option.dataset.metrics || "{}");
@@ -414,6 +415,7 @@ function applySelectedModel() {
   $("trained-model-summary").textContent =
     `${option.dataset.trait} · ${option.dataset.samples || "?"} 个样本 · ${option.dataset.snps || "?"} 个 SNP · 测试 R² ${formatMetric(metrics.test_r2)} · 质量${qualityLabels[option.dataset.quality] || "待评估"}`;
   $("trained-model-summary").classList.remove("empty");
+  $("model-panel-summary").textContent = option.dataset.name || "已选择模型";
   loadModelComparison(option.dataset.trait, option.dataset.datasetId || "");
 }
 
@@ -456,7 +458,7 @@ async function loadModels(preferredId = "") {
     option.dataset.datasetId = model.dataset_id || "";
     select.appendChild(option);
   });
-  $("model-count").textContent = String(data.models.length);
+  $("model-panel-summary").textContent = `${data.models.length} 个模型`;
   select.value = data.models.some((model) => model.model_id === wanted) ? wanted : (data.models[0]?.model_id || "");
   applySelectedModel();
 }
@@ -466,6 +468,7 @@ function applySelectedDataset() {
   if (!option?.value) {
     $("dataset-summary").textContent = "选择数据后将在这里显示物种、性状和规模。";
     $("dataset-summary").classList.add("empty");
+    $("dataset-panel-summary").textContent = "未选择";
     $("dataset-dir").value = "data";
     $("dataset-inspection-result").textContent = "请先选择数据集。";
     return;
@@ -478,6 +481,7 @@ function applySelectedDataset() {
   $("dataset-summary").textContent =
     `${option.dataset.demo ? "共享示例" : "私人数据"} · ${option.dataset.species || "未填写物种"} · ${option.dataset.trait} · ${scale}`;
   $("dataset-summary").classList.remove("empty");
+  $("dataset-panel-summary").textContent = `${option.dataset.species || "未填写物种"} · ${option.dataset.trait}`;
   $("dataset-inspection-result").textContent = "展开后执行只读质量检查。";
   $("dataset-inspection-result").classList.add("empty");
 }
@@ -531,15 +535,18 @@ async function restoreConversation(conversation) {
 
 async function loadConversationHistory() {
   const container = $("conversation-history");
+  if (!container) return;
   try {
     const data = await request(`/api/v1/conversations?${userQuery()}`);
     container.replaceChildren();
     if (!data.conversations.length) {
       container.textContent = "暂无历史会话";
       container.className = "task-history empty-history";
+      $("history-panel-summary").textContent = "0 个会话";
       return;
     }
     container.className = "task-history";
+    $("history-panel-summary").textContent = `${data.conversations.length} 个会话`;
     data.conversations.forEach((conversation) => {
       const button = document.createElement("button");
       button.className = `history-row${conversation.conversation_id === conversationId ? " active" : ""}`;
@@ -599,7 +606,10 @@ async function initialize() {
 
 const appReady = initialize().catch((error) => notice(error.message, true));
 
-$("llm-status").addEventListener("click", () => $("llm-panel").scrollIntoView({ behavior: "smooth", block: "start" }));
+$("llm-status").addEventListener("click", () => {
+  $("llm-panel").open = true;
+  $("llm-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+});
 $("llm-provider").addEventListener("change", () => {
   updateLlmProviderFields();
   loadLlmModels();
@@ -849,5 +859,9 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 
-$("refresh-history").addEventListener("click", loadConversationHistory);
+$("refresh-history").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  loadConversationHistory();
+});
 checkHealth();

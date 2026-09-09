@@ -142,6 +142,14 @@ def web_app() -> RedirectResponse:
     return RedirectResponse(url="/app/")
 
 
+def _mask_api_key(api_key: str) -> str:
+    if not api_key:
+        return ""
+    if len(api_key) <= 8:
+        return "*" * len(api_key)
+    return f"{api_key[:3]}{'*' * min(16, len(api_key) - 7)}{api_key[-4:]}"
+
+
 @app.get("/api/v1/settings/llm")
 def get_llm_settings() -> Dict[str, Any]:
     return {
@@ -152,6 +160,7 @@ def get_llm_settings() -> Dict[str, Any]:
         "intent_model": llm_settings.get("intent_model") or llm_settings.get("model", ""),
         "analysis_model": llm_settings.get("analysis_model") or llm_settings.get("model", ""),
         "api_key_configured": bool(llm_settings.get("api_key")),
+        "api_key_masked": _mask_api_key(llm_settings.get("api_key", "")),
         "mode": "llm" if intent_parser.client.enabled else "rules",
     }
 
