@@ -64,3 +64,5 @@
 .advanced-settings[open]>summary::before{content:"−"}
 .advanced-settings-body{display:grid;gap:15px;margin-top:14px}
 @media(max-width:560px){.context-summary{padding:18px}.context-panel-body,.context-panel>form,.context-panel>label,.context-panel>.dataset-summary,.context-panel>.foldout,.context-panel>.model-actions,.context-panel>.comparison,.context-panel>.field-help,.context-panel>.inline-result,.context-panel>input{margin-left:18px;margin-right:18px}.context-panel-heading{margin-left:18px;margin-right:18px}.panel-summary{max-width:42%;font-size:10px}}
+
+.history-row-wrap{display:flex;align-items:stretch;border-top:1px solid #edf0ed}.history-row-wrap .history-row{flex:1;border-top:0}.history-delete{border:0;background:transparent;color:#8a6868;font-size:11px;padding:0 6px;cursor:pointer;opacity:0}.history-row-wrap:hover .history-delete,.history-row-wrap.active .history-delete{opacity:1}.history-delete:hover{color:#b34747;background:#fff4f1}

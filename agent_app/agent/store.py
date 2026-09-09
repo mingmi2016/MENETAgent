@@ -21,7 +21,8 @@ class TaskStore:
                     user_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
                 )
             """)
             connection.execute("""
@@ -107,6 +108,7 @@ class TaskStore:
             self._ensure_column(connection, "datasets", "sample_count", "INTEGER")
             self._ensure_column(connection, "datasets", "snp_count", "INTEGER")
             self._ensure_column(connection, "conversations", "user_id", "TEXT NOT NULL DEFAULT 'user_local'")
+            self._ensure_column(connection, "conversations", "deleted_at", "TEXT")
             now = self._now()
             connection.execute(
                 "INSERT OR IGNORE INTO users(user_id,display_name,created_at,updated_at) VALUES(?,?,?,?)",
@@ -282,6 +284,11 @@ class TaskStore:
     def _model_record(row: sqlite3.Row) -> Dict[str, Any]:
         value = dict(row)
         value["metrics"] = json.loads(value.pop("metrics_json") or "{}")
+        config_path = Path(value["output_dir"]) / "training_config.json"
+        try:
+            value["training_config"] = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            value["training_config"] = {}
         return value
 
     def add_message(self, conversation_id: str, role: str, content: str) -> str:
@@ -397,7 +404,7 @@ class TaskStore:
 
     def get_conversation(self, conversation_id: str, message_limit: int = 50, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as connection:
-            query = "SELECT conversation_id,user_id,state_json,created_at,updated_at FROM conversations WHERE conversation_id=?"
+            query = "SELECT conversation_id,user_id,state_json,created_at,updated_at,deleted_at FROM conversations WHERE conversation_id=?"
             params: tuple = (conversation_id,)
             if user_id:
                 query += " AND user_id=?"
@@ -407,7 +414,7 @@ class TaskStore:
             return None
         return {
             "conversation_id": row[0], "user_id": row[1], "state": json.loads(row[2]),
-            "created_at": row[3], "updated_at": row[4],
+            "created_at": row[3], "updated_at": row[4], "deleted_at": row[5],
             "messages": self.history(conversation_id, message_limit),
         }
 
@@ -423,7 +430,7 @@ class TaskStore:
                      WHERE last_message.conversation_id=c.conversation_id
                      ORDER BY last_message.created_at DESC LIMIT 1) AS last_message
                 FROM conversations c
-                WHERE c.user_id=?
+                WHERE c.user_id=? AND c.deleted_at IS NULL
                 ORDER BY c.updated_at DESC
                 LIMIT ?
                 """,
@@ -437,6 +444,14 @@ class TaskStore:
             "title": (row[4] or "新对话")[:60],
             "last_message": row[5] or "",
         } for row in rows]
+
+    def delete_conversation(self, conversation_id: str, user_id: str = DEFAULT_USER_ID) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE conversations SET deleted_at=?,updated_at=? WHERE conversation_id=? AND user_id=? AND deleted_at IS NULL",
+                (self._now(), self._now(), conversation_id, user_id),
+            )
+        return cursor.rowcount > 0
 
     def update_conversation(self, conversation_id: str, changes: Dict[str, Any], user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         conversation = self.ensure_conversation(conversation_id, user_id)

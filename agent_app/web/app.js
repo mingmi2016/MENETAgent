@@ -4,6 +4,8 @@ let activeTaskId = "";
 let conversationId = null;
 let predictionGenotypePath = "";
 let selectedModelId = "";
+let activeTrait = "";
+let datasetNameEdited = false;
 const taskPollers = new Map();
 const taskNodes = new Map();
 const knownTaskStatuses = new Map();
@@ -44,6 +46,85 @@ function notice(message, error = false) {
 
 function clearNotice() {
   $("notice").className = "notice hidden";
+}
+
+function parseCsvHeader(text) {
+  const firstLine = text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  const fields = [];
+  let value = "";
+  let quoted = false;
+  for (let index = 0; index < firstLine.length; index += 1) {
+    const character = firstLine[index];
+    if (character === '"') {
+      if (quoted && firstLine[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === "," && !quoted) {
+      fields.push(value.trim());
+      value = "";
+    } else {
+      value += character;
+    }
+  }
+  fields.push(value.trim());
+  return fields.filter(Boolean);
+}
+
+function getSpeciesValue() {
+  const selected = $("upload-species").value;
+  return selected === "__custom__" ? $("upload-species-custom").value.trim() : selected.trim();
+}
+
+function syncCustomSpeciesField() {
+  const custom = $("upload-species").value === "__custom__";
+  $("upload-species-custom").classList.toggle("hidden", !custom);
+  $("upload-species-custom").required = custom;
+}
+
+function recommendedDatasetName() {
+  const species = getSpeciesValue();
+  const trait = $("upload-trait").value.trim();
+  if (!species || !trait) return "";
+  const date = new Date().toLocaleDateString("sv-SE");
+  return `${species}_${trait}_${date}`;
+}
+
+function updateRecommendedDatasetName(force = false) {
+  const recommendation = recommendedDatasetName();
+  if (recommendation && (force || !datasetNameEdited || !$("upload-dataset-name").value.trim())) {
+    $("upload-dataset-name").value = recommendation;
+    datasetNameEdited = false;
+  }
+}
+
+async function inferTraitsFromPhenotype() {
+  const file = $("phenotype").files[0];
+  const target = $("trait-detection");
+  const options = $("upload-trait-options");
+  options.replaceChildren();
+  if (!file) {
+    target.textContent = "系统将从表型文件列名识别性状，识别后仍可修改。";
+    return;
+  }
+  try {
+    const header = parseCsvHeader(await file.slice(0, 64 * 1024).text());
+    const traits = header.slice(1).filter((name) => !/^(id|fid|iid|sample|sample_id)$/i.test(name));
+    traits.forEach((trait) => options.appendChild(new Option(trait, trait)));
+    if (!traits.length) {
+      target.textContent = "未从表型文件识别到性状列，请手动填写。";
+      return;
+    }
+    $("upload-trait").value = traits[0];
+    target.textContent = traits.length === 1
+      ? `已识别性状：${traits[0]}，可以手动修改。`
+      : `已识别 ${traits.length} 个性状，可从输入框候选项中选择。`;
+    updateRecommendedDatasetName();
+  } catch (error) {
+    target.textContent = `读取表型列名失败：${error.message}，请手动填写。`;
+  }
 }
 
 function showLlmResult(message, error = false) {
@@ -194,6 +275,7 @@ async function renderArtifacts(taskId, container) {
     "trait_specific_encoder.pt": "性状编码器",
     "metrics.json": "评估指标",
     "training_history.json": "训练历史",
+    "training_config.json": "训练参数",
     "test_predictions.csv": "测试集预测",
     "snp_importance.csv": "SNP 重要性",
     "report.html": "分析报告",
@@ -443,7 +525,10 @@ async function loadModelComparison(trait = "", datasetId = "") {
 }
 
 async function loadModels(preferredId = "") {
-  const data = await request(`/api/v1/models?${userQuery()}`);
+  const params = new URLSearchParams(userQuery());
+  const datasetId = $("dataset-select")?.value || "";
+  if (datasetId) params.set("dataset_id", datasetId);
+  const data = await request(`/api/v1/models?${params}`);
   const select = $("trained-model-select");
   const wanted = preferredId || selectedModelId || localStorage.getItem(modelKey()) || "";
   select.replaceChildren(new Option(data.models.length ? "自动选择最近兼容模型" : "尚无训练模型", ""));
@@ -459,7 +544,7 @@ async function loadModels(preferredId = "") {
     select.appendChild(option);
   });
   $("model-panel-summary").textContent = `${data.models.length} 个模型`;
-  select.value = data.models.some((model) => model.model_id === wanted) ? wanted : (data.models[0]?.model_id || "");
+  select.value = data.models.some((model) => model.model_id === wanted) ? wanted : "";
   applySelectedModel();
 }
 
@@ -471,12 +556,18 @@ function applySelectedDataset() {
     $("dataset-panel-summary").textContent = "未选择";
     $("dataset-dir").value = "data";
     $("dataset-inspection-result").textContent = "请先选择数据集。";
+    $("dataset-inspection-result").classList.add("empty");
+    $("dataset-inspection").open = false;
+    activeTrait = "";
     return;
   }
-  $("trait").value = option.dataset.trait;
+  activeTrait = option.dataset.trait;
   $("dataset-dir").value = option.dataset.directory;
-  $("dataset-name").value = option.dataset.name || "";
-  $("species").value = option.dataset.species || "";
+  const modelOption = $("trained-model-select").selectedOptions[0];
+  if (modelOption?.value && (modelOption.dataset.datasetId !== option.value || modelOption.dataset.trait !== activeTrait)) {
+    $("trained-model-select").value = "";
+    applySelectedModel();
+  }
   const scale = option.dataset.samples ? `${option.dataset.samples} 个样本 · ${option.dataset.snps} 个 SNP` : "规模将在首次检查后补充";
   $("dataset-summary").textContent =
     `${option.dataset.demo ? "共享示例" : "私人数据"} · ${option.dataset.species || "未填写物种"} · ${option.dataset.trait} · ${scale}`;
@@ -489,7 +580,11 @@ function applySelectedDataset() {
 async function loadDatasetInspection() {
   const datasetId = $("dataset-select").value;
   const target = $("dataset-inspection-result");
-  if (!datasetId) return;
+  if (!datasetId) {
+    target.textContent = "请先选择数据集。";
+    target.classList.add("empty");
+    return;
+  }
   target.textContent = "正在检查数据...";
   try {
     const response = await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/inspection?${userQuery()}`);
@@ -548,8 +643,10 @@ async function loadConversationHistory() {
     container.className = "task-history";
     $("history-panel-summary").textContent = `${data.conversations.length} 个会话`;
     data.conversations.forEach((conversation) => {
+      const row = document.createElement("div");
+      row.className = `history-row-wrap${conversation.conversation_id === conversationId ? " active" : ""}`;
       const button = document.createElement("button");
-      button.className = `history-row${conversation.conversation_id === conversationId ? " active" : ""}`;
+      button.className = "history-row";
       const title = document.createElement("strong");
       title.textContent = conversation.title;
       const meta = document.createElement("span");
@@ -561,7 +658,22 @@ async function loadConversationHistory() {
         localStorage.removeItem(taskKey());
         location.reload();
       });
-      container.appendChild(button);
+      const remove = document.createElement("button");
+      remove.className = "history-delete";
+      remove.type = "button";
+      remove.title = "删除会话";
+      remove.textContent = "删除";
+      remove.addEventListener("click", async (event) => {
+        event.preventDefault(); event.stopPropagation();
+        if (!window.confirm("删除后会从历史列表中隐藏，任务和结果仍会保留。确定删除吗？")) return;
+        try {
+          await request(`/api/v1/conversations/${encodeURIComponent(conversation.conversation_id)}?${userQuery()}`, { method: "DELETE" });
+          if (conversation.conversation_id === conversationId) {
+            localStorage.removeItem(conversationKey()); localStorage.removeItem(taskKey()); location.reload();
+          } else await loadConversationHistory();
+        } catch (error) { notice(error.message, true); }
+      });
+      row.append(button, remove); container.appendChild(row);
     });
   } catch (error) {
     container.textContent = `任务历史加载失败：${error.message}`;
@@ -591,9 +703,14 @@ async function initialize() {
     localStorage.setItem(conversationKey(), conversationId);
   }
   const state = conversation.state || {};
-  if (state.active_trait) $("trait").value = state.active_trait;
+  if (state.active_trait) activeTrait = state.active_trait;
   if (state.active_dataset_dir) $("dataset-dir").value = state.active_dataset_dir;
   if (state.active_output_base_dir) $("output-dir").value = state.active_output_base_dir;
+  if (state.active_prediction_genotype_path) {
+    predictionGenotypePath = state.active_prediction_genotype_path;
+    $("prediction-result").textContent = `已设置：${state.active_prediction_genotype_name || "待预测基因型"}`;
+    $("prediction-result").classList.remove("hidden");
+  }
   if (state.active_task_id) {
     activeTaskId = state.active_task_id;
     localStorage.setItem(taskKey(), activeTaskId);
@@ -646,11 +763,17 @@ $("prediction-form").addEventListener("submit", async (event) => {
   const file = $("prediction-genotype").files[0];
   if (!file) return;
   try {
+    const datasetId = $("dataset-select").value;
+    if (!datasetId) {
+      notice("请先选择待预测数据所对应的训练数据集。", true);
+      return;
+    }
     const form = new FormData();
     form.append("file", file);
-    const data = await request(`/api/v1/prediction-genotypes/upload?${userQuery()}`, { method: "POST", body: form });
+    const query = new URLSearchParams({ user_id: currentUserId, dataset_id: datasetId, conversation_id: conversationId });
+    const data = await request(`/api/v1/prediction-genotypes/upload?${query}`, { method: "POST", body: form });
     predictionGenotypePath = data.path;
-    $("prediction-result").textContent = "已设置：" + data.filename;
+    $("prediction-result").textContent = `已设置：${data.filename}（已归档到当前数据集）`;
     $("prediction-result").classList.remove("hidden");
     notice("新基因型文件已设置，点击“预测性状”后发送即可。", false);
   } catch (error) {
@@ -689,11 +812,25 @@ $("add-user").addEventListener("click", async () => {
   }
 });
 
-$("dataset-select").addEventListener("change", applySelectedDataset);
+$("dataset-select").addEventListener("change", async () => {
+  applySelectedDataset();
+  await loadModels();
+});
 $("trained-model-select").addEventListener("change", applySelectedModel);
 $("dataset-inspection").addEventListener("toggle", (event) => {
   if (event.currentTarget.open) loadDatasetInspection();
 });
+$("refresh-inspection").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  $("dataset-inspection").open = true;
+  loadDatasetInspection();
+});
+$("upload-species").addEventListener("change", () => {
+  syncCustomSpeciesField();
+  updateRecommendedDatasetName();
+});
+$("upload-species-custom").addEventListener("input", () => updateRecommendedDatasetName());
 
 $("repeat-model").addEventListener("click", async () => {
   if (!selectedModelId) return;
@@ -751,6 +888,11 @@ $("archive-model").addEventListener("click", async () => {
   } catch (error) { notice(error.message, true); }
 });
 
+$("phenotype").addEventListener("change", inferTraitsFromPhenotype);
+$("upload-species").addEventListener("input", () => updateRecommendedDatasetName());
+$("upload-trait").addEventListener("input", () => updateRecommendedDatasetName());
+$("upload-dataset-name").addEventListener("input", () => { datasetNameEdited = true; });
+
 $("upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   clearNotice();
@@ -759,9 +901,9 @@ $("upload-form").addEventListener("submit", async (event) => {
   form.append("genotype", $("genotype").files[0]);
   form.append("phenotype", $("phenotype").files[0]);
   const query = new URLSearchParams({
-    trait: $("trait").value,
-    name: $("dataset-name").value,
-    species: $("species").value,
+    trait: $("upload-trait").value,
+    name: $("upload-dataset-name").value,
+    species: getSpeciesValue(),
     conversation_id: conversationId,
     user_id: currentUserId,
   });
@@ -778,7 +920,7 @@ $("upload-form").addEventListener("submit", async (event) => {
 });
 
 document.querySelectorAll("[data-template]").forEach((button) => button.addEventListener("click", () => {
-  const trait = $("trait").value.trim() || "plant_height";
+  const trait = activeTrait || "plant_height";
   $("message").value = button.dataset.template.replaceAll("{trait}", trait);
   $("message").focus();
 }));
@@ -786,7 +928,7 @@ document.querySelectorAll("[data-template]").forEach((button) => button.addEvent
 function confirmLongTask(text) {
   if (!/(训练|报告|train|report)/i.test(text)) return Promise.resolve(true);
   const selected = $("dataset-select").selectedOptions[0];
-  $("confirm-summary").textContent = `${selected?.textContent || "当前数据"}；性状 ${$("trait").value || "未指定"}。`;
+  $("confirm-summary").textContent = `${selected?.textContent || "当前数据"}；性状 ${activeTrait || "未指定"}。`;
   const dialog = $("task-confirm");
   dialog.showModal();
   return new Promise((resolve) => {
@@ -841,8 +983,12 @@ $("chat-form").addEventListener("submit", async (event) => {
       await loadConversationHistory();
     } else if (data.type === "needs_input") {
       addMessage(`请补充：${(data.parsed?.missing_fields || []).join("、")}`, "agent");
-    } else if (data.type === "needs_model") {
+    } else if (data.type === "needs_model" || data.type === "model_list") {
       addMessage(data.message, "agent");
+      if (data.type === "model_list") {
+        $("model-panel").open = true;
+        await loadModels(selectedModelId);
+      }
     } else {
       addMessage(`任务参数无效：${(data.errors || []).join("；")}`, "agent");
     }

@@ -54,6 +54,15 @@ class MenetTask:
     def __post_init__(self) -> None:
         if isinstance(self.intent, str):
             self.intent = TaskIntent(self.intent)
+        if isinstance(self.device, str):
+            device_aliases = {
+                "gpu": "cuda",
+                "cuda": "cuda",
+                "cpu": "cpu",
+                "auto": "auto",
+                "automatic": "auto",
+            }
+            self.device = device_aliases.get(self.device.strip().lower(), self.device.strip().lower())
 
     def validate(self) -> List[str]:
         errors: List[str] = []

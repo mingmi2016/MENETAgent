@@ -194,12 +194,19 @@ class MenetTools:
                 return self._result(False, "failed", ["训练性状特异编码器至少需要训练集和验证集各 2 个样本"], [])
             set_seed(int(task.metadata.get("seed", 42)))
             config["batch_size"] = min(int(config["batch_size"]), len(data_train))
+            train_batch_size = config["batch_size"]
             drop_singleton = len(data_train) % config["batch_size"] == 1
             train_loader = create_triplet_dataloader(
                 config, data_train, flag=config["flag"], shuffle=True, drop_last=drop_singleton
             )
             config["batch_size"] = min(int(config["batch_size"]), len(data_val))
+            validation_batch_size = config["batch_size"]
             val_loader = create_triplet_dataloader(config, data_val, flag=config["flag"])
+            self._write_training_snapshot(task, "trait_encoder", {
+                **config,
+                "train_batch_size": train_batch_size,
+                "validation_batch_size": validation_batch_size,
+            })
             model = TraitSpecificEncoderForRepGeno(
                 snp_size=data_train.shape[-1] - 1,
                 stride=config["stride"],
@@ -241,6 +248,7 @@ class MenetTools:
             set_seed(int(task.metadata.get("seed", 42)))
             config["batch_size"] = min(int(config["batch_size"]), len(snp_train))
             drop_singleton = len(snp_train) % config["batch_size"] == 1
+            self._write_training_snapshot(task, "menet", config)
             train_loader = create_dual_scale_dataloader(
                 snp_train, gr_train, config, shuffle=True, drop_last=drop_singleton
             )
@@ -393,6 +401,28 @@ class MenetTools:
             return self._result(True, "completed", [], [], {"artifacts": [str(report_path)]})
         except Exception as exc:
             return self._result(False, "failed", [f"报告生成失败: {exc}"], [])
+
+    @staticmethod
+    def _write_training_snapshot(task: MenetTask, component: str, config: Dict[str, Any]) -> str:
+        path = Path(task.output_dir) / "training_config.json"
+        try:
+            snapshot = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            snapshot = {}
+        snapshot.update({
+            "schema_version": 1,
+            "training_mode": task.metadata.get("training_mode", "recommended"),
+            "trait": task.trait,
+            "device_requested": task.device,
+            "split_strategy": task.split_strategy,
+            "split_ratios": {"train": task.train_ratio, "validation": task.valid_ratio, "test": task.test_ratio},
+            "split_seed": int(task.metadata.get("split_seed", 42)),
+            "training_seed": int(task.metadata.get("seed", 42)),
+            "explain_snp": task.explain_snp,
+        })
+        snapshot.setdefault("components", {})[component] = json.loads(json.dumps(config))
+        path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
 
     @staticmethod
     def _load_config(filename: str, task: MenetTask) -> Dict[str, Any]:

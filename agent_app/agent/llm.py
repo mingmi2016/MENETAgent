@@ -234,14 +234,20 @@ class AgentIntentParser:
                 '"missing_fields", and "confidence". Allowed intents: inspect_data, train_model, '
                 "predict_trait, evaluate_model, explain_model, generate_report. Arguments may contain "
                 "trait, device, split_strategy, explain_snp, and epochs. Extract only facts present in "
-                "the user request. Use null for an unknown intent.",
+                "the user request. Only trait may be required for these intents; device, split_strategy, "
+                "epochs, and explain_snp are optional and must never appear in missing_fields. "
+                "Use null for an unknown intent.",
                 message,
             )
             intent = TaskIntent(data["intent"]) if data.get("intent") else None
             raw_arguments = data.get("arguments") or {}
             allowed = {"trait", "device", "split_strategy", "explain_snp", "epochs"}
             arguments = {key: value for key, value in raw_arguments.items() if key in allowed}
-            missing = data.get("missing_fields") or ([] if arguments.get("trait") else ["trait"])
+            required_fields = {"trait"}
+            reported_missing = data.get("missing_fields") or []
+            missing = [field for field in reported_missing if field in required_fields]
+            if not arguments.get("trait") and "trait" not in missing:
+                missing.append("trait")
             confidence = min(1.0, max(0.0, float(data.get("confidence", 0.7))))
             return ParsedIntent(intent, arguments, missing, confidence)
         except Exception:

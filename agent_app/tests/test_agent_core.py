@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from agent import MenetTask, MenetWorkflow, TaskIntent
 from agent.intent import IntentParser
-from agent.llm import CompatibleLLMClient, load_llm_settings, save_llm_settings
+from agent.llm import AgentIntentParser, CompatibleLLMClient, load_llm_settings, save_llm_settings
 from agent.store import TaskStore
 from agent.tools import MenetTools
 from agent.api import ChatRequest, _latest_compatible_run, _prepare_task_directories, _resolve_dataset, _validate_paths, _with_runtime
@@ -46,6 +46,31 @@ def test_intent_parser_extracts_training_request():
         "explain_snp": True,
         "epochs": 50,
     }
+
+
+def test_llm_prediction_does_not_require_training_only_fields():
+    class FakeClient:
+        enabled = True
+
+        @staticmethod
+        def complete_json(_system_prompt, _message):
+            return {
+                "intent": "predict_trait",
+                "arguments": {"trait": "flowering_arkansas"},
+                "missing_fields": ["device", "split_strategy"],
+                "confidence": 0.9,
+            }
+
+    parsed = AgentIntentParser(client=FakeClient()).parse("请预测性状为 flowering_arkansas")
+
+    assert parsed.intent == TaskIntent.PREDICT_TRAIT
+    assert parsed.arguments == {"trait": "flowering_arkansas"}
+    assert parsed.missing_fields == []
+
+
+def test_menet_task_normalizes_gpu_device_alias():
+    task = MenetTask(trait="culmlength", device="GPU")
+    assert task.device == "cuda"
 
 
 def test_local_ollama_client_does_not_require_api_key():
@@ -160,6 +185,23 @@ def test_random_split_is_reproducible(tmp_path):
     assert first["success"] and second["success"]
     assert actual == expected
     assert not (data / "split").exists()
+
+
+def test_training_configuration_snapshot_is_saved_with_model(tmp_path):
+    task = MenetTask(
+        trait="culmlength", output_dir=str(tmp_path), device="cuda", split_strategy="random",
+        train_ratio=0.7, valid_ratio=0.15, test_ratio=0.15, explain_snp=True,
+        metadata={"training_mode": "research", "split_seed": 17, "seed": 23},
+    )
+    path = MenetTools._write_training_snapshot(task, "menet", {"lr": 0.001, "batch_size": 16})
+    MenetTools._write_training_snapshot(task, "trait_encoder", {"margin": 0.1, "batch_size": 32})
+    snapshot = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert snapshot["training_mode"] == "research"
+    assert snapshot["split_seed"] == 17
+    assert snapshot["training_seed"] == 23
+    assert snapshot["split_ratios"] == {"train": 0.7, "validation": 0.15, "test": 0.15}
+    assert snapshot["components"]["menet"]["lr"] == 0.001
+    assert snapshot["components"]["trait_encoder"]["margin"] == 0.1
 
 
 def test_training_loader_can_drop_singleton_tail_batch():

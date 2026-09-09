@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .models import MenetTask, TaskIntent
+from .intent import IntentParser
 from .llm import (
     AgentIntentParser,
     CompatibleLLMClient,
@@ -255,6 +256,14 @@ def list_conversations(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     return {"conversations": store.list_conversations(user_id)}
 
 
+@app.delete("/api/v1/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    _require_user(user_id)
+    if not store.delete_conversation(conversation_id, user_id):
+        raise HTTPException(status_code=404, detail="会话不存在或已删除")
+    return {"conversation_id": conversation_id, "status": "deleted", "message": "会话已移入回收状态"}
+
+
 @app.get("/api/v1/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     conversation = store.get_conversation(conversation_id, user_id=user_id)
@@ -355,16 +364,27 @@ async def upload_dataset(
 
 @app.post("/api/v1/prediction-genotypes/upload", status_code=201)
 async def upload_prediction_genotype(
+    dataset_id: str,
     file: UploadFile = File(...),
     user_id: str = DEFAULT_USER_ID,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Store a genotype file for a one-off new-material prediction."""
+    """Store a new-material genotype file alongside its selected dataset context."""
     _require_user(user_id)
+    dataset = store.get_dataset(dataset_id, user_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="请先选择用于预测的数据集")
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="预测基因型文件必须是 CSV")
-    destination_dir = service_root / "uploads" / user_id / "prediction_inputs"
+
+    dataset_dir = Path(dataset["dataset_dir"]).resolve()
+    private_upload_root = (service_root / "uploads" / user_id).resolve()
+    if not dataset.get("is_demo") and dataset_dir.is_relative_to(private_upload_root):
+        destination_dir = dataset_dir / "prediction_inputs"
+    else:
+        destination_dir = private_upload_root / dataset_id / "prediction_inputs"
     destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / f"{uuid4().hex[:12]}_genotype.csv"
+    destination = destination_dir / f"{uuid4().hex[:12]}_{Path(file.filename).name}"
     try:
         info = await _save_upload(file, destination, 2 * 1024 * 1024 * 1024)
     except HTTPException:
@@ -373,13 +393,44 @@ async def upload_prediction_genotype(
     except Exception as exc:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"保存预测基因型失败: {exc}") from exc
-    return {"path": str(destination), "filename": file.filename, **info}
+
+    if conversation_id:
+        conversation = store.get_conversation(conversation_id, user_id=user_id)
+        if conversation is None:
+            destination.unlink(missing_ok=True)
+            raise HTTPException(status_code=404, detail="会话不存在或不属于当前用户")
+        store.update_conversation(conversation_id, {
+            "active_prediction_genotype_path": str(destination),
+            "active_prediction_genotype_name": file.filename,
+        }, user_id)
+    return {
+        "path": str(destination),
+        "filename": file.filename,
+        "dataset_id": dataset_id,
+        "storage": "dataset" if destination_dir.parent == dataset_dir else "user_dataset_archive",
+        **info,
+    }
 
 
 @app.get("/api/v1/models")
-def list_trained_models(user_id: str = DEFAULT_USER_ID, include_archived: bool = False) -> Dict[str, Any]:
+def list_trained_models(
+    user_id: str = DEFAULT_USER_ID,
+    include_archived: bool = False,
+    dataset_id: str = "",
+) -> Dict[str, Any]:
     _require_user(user_id)
-    return {"models": [_with_model_quality(model) for model in store.list_models(user_id, include_archived=include_archived)]}
+    models = store.list_models(user_id, include_archived=include_archived)
+    if dataset_id:
+        dataset = store.get_dataset(dataset_id, user_id)
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="数据集不存在或不属于当前用户")
+        dataset_dir = str(Path(dataset["dataset_dir"]).resolve())
+        models = [
+            model for model in models
+            if model.get("dataset_id") == dataset_id
+            or str(Path(model.get("dataset_dir", "")).resolve()) == dataset_dir
+        ]
+    return {"models": [_with_model_quality(model) for model in models]}
 
 
 @app.get("/api/v1/models/compare")
@@ -513,8 +564,43 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
     output_base_dir = request.output_dir or state.get("active_output_base_dir") or "runs"
     _validate_paths(dataset_dir, output_base_dir)
     store.add_message(conversation_id, "user", request.message)
+    model_query = any(term in request.message.lower() for term in ("有哪些模型", "模型列表", "可用模型", "对应模型", "对应的模型", "有哪些对应", "模型情况"))
+    if model_query:
+        query_trait = IntentParser._extract_trait(request.message) or (dataset or {}).get("trait")
+        target_dataset_id = (dataset or {}).get("dataset_id")
+        target_dataset_dir = str(Path((dataset or {}).get("dataset_dir", "")).resolve()) if dataset else ""
+        models = [
+            item for item in store.list_models(request.user_id)
+            if target_dataset_id and (
+                item.get("dataset_id") == target_dataset_id
+                or str(Path(item.get("dataset_dir", "")).resolve()) == target_dataset_dir
+            )
+        ]
+        if query_trait:
+            models = [item for item in models if item.get("trait") == query_trait]
+        dataset_label = (dataset or {}).get("name") or target_dataset_id or "当前数据集"
+        if not models:
+            reply = f"当前数据集：{dataset_label}（{target_dataset_id or '未选择'}）\n"
+            reply += f"暂时没有已完成的{query_trait + ' ' if query_trait else ''}模型。请先在这个数据集上训练模型。"
+        else:
+            lines = [f"当前数据集：{dataset_label}（{target_dataset_id}）", f"共有 {len(models)} 个可用模型："]
+            for index, model in enumerate(models, 1):
+                source = store.get(model["task_id"], request.user_id)
+                source_task = source["task"] if source else {}
+                metrics = model.get("metrics", {})
+                r2 = metrics.get("test_r2")
+                r2_text = f"测试 R² {float(r2):.3f}" if isinstance(r2, (int, float)) else "测试 R² 暂无"
+                lines.append(f"{index}. {model['name']}；模型 ID：{model['model_id']}；训练 {source_task.get('epochs') or '默认'} 轮；{r2_text}")
+            lines.append("请在右侧训练模型中选择模型后发送预测请求，也可以直接说‘使用模型 model_xxx 预测’。")
+            reply = "\n".join(lines)
+        store.add_message(conversation_id, "assistant", reply)
+        return {"type": "model_list", "conversation_id": conversation_id, "message": reply, "models": models}
     parsed = intent_parser.parse(request.message)
-    requested_model = store.get_model(request.model_id, request.user_id) if request.model_id else None
+    requested_model_id = request.model_id
+    if not requested_model_id:
+        model_match = re.search(r"\b(model_[a-z0-9]+)\b", request.message.lower())
+        requested_model_id = model_match.group(1) if model_match else None
+    requested_model = store.get_model(requested_model_id, request.user_id) if requested_model_id else None
     context_trait = (requested_model or {}).get("trait") or (dataset or {}).get("trait") or state.get("active_trait")
     if "trait" in parsed.missing_fields and context_trait:
         parsed.arguments["trait"] = context_trait
@@ -531,7 +617,11 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
             if selected_model is None or selected_model.get("status") != "active":
                 raise HTTPException(status_code=404, detail="所选模型不存在或已归档")
             if selected_model["trait"] != parsed.arguments["trait"]:
-                reply = f"所选模型用于 {selected_model['trait']}，不能预测 {parsed.arguments['trait']}。请更换模型或性状。"
+                reply = f"所选模型用于 {selected_model['trait']}，不能处理 {parsed.arguments['trait']}。请更换模型或性状。"
+                store.add_message(conversation_id, "assistant", reply)
+                return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict()}
+            if dataset and selected_model.get("dataset_id") != dataset.get("dataset_id"):
+                reply = "所选模型不属于当前数据集。请切换到模型对应的数据集，或先为当前数据集训练模型。"
                 store.add_message(conversation_id, "assistant", reply)
                 return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict()}
             source_run = store.get(selected_model["task_id"], request.user_id)
@@ -549,18 +639,27 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
                 "message": reply,
                 "parsed": parsed.to_dict(),
             }
+    task_arguments = dict(parsed.arguments)
+    # For newly uploaded datasets, generate a reproducible random split when
+    # the user did not provide MENET's existing split files.
+    if parsed.intent == TaskIntent.TRAIN_MODEL and "split_strategy" not in task_arguments:
+        split_dir = Path(dataset_dir) / "split"
+        required_splits = ("train_index.txt", "valid_index.txt", "test_index.txt")
+        if not all((split_dir / name).is_file() for name in required_splits):
+            task_arguments["split_strategy"] = "random"
     payload = {
         "intent": parsed.intent,
-        "trait": parsed.arguments["trait"],
+        "trait": task_arguments["trait"],
         "owner_user_id": request.user_id,
         "dataset_dir": dataset_dir,
         "output_dir": output_base_dir,
         **({"source_output_dir": source_run["task"]["output_dir"]} if source_run else {}),
-        **parsed.arguments,
+        **task_arguments,
         "metadata": {
             "conversation_id": conversation_id,
             **({"dataset_id": dataset["dataset_id"]} if dataset else {}),
-            **({"model_id": selected_model["model_id"], "model_name": selected_model["name"]} if selected_model else {}),
+            **({"model_id": selected_model["model_id"], "model_name": selected_model["name"],
+                "model_selection": "manual" if requested_model_id else "automatic"} if selected_model else {}),
             **({"prediction_genotype_path": request.prediction_genotype_path} if request.prediction_genotype_path else {}),
         },
     }
@@ -640,7 +739,38 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
         raise HTTPException(status_code=404, detail="任务不存在")
     if task["result"] is None:
         raise HTTPException(status_code=409, detail="任务尚未完成")
-    return {"task_id": task_id, "answer": result_interpreter.explain(task["result"])}
+
+    task_data = task["task"]
+    metadata = task_data.get("metadata", {})
+    model_id = metadata.get("model_id")
+    model = store.get_model(model_id, user_id) if model_id else None
+    model_selection = None
+    if model:
+        source_task = store.get(model["task_id"], user_id)
+        source_data = source_task["task"] if source_task else {}
+        model_selection = {
+            "selection": "manual" if metadata.get("model_selection") == "manual" else "automatic",
+            "model_id": model["model_id"],
+            "model_name": model["name"],
+            "training_task_id": model["task_id"],
+            "training_epochs": source_data.get("epochs"),
+            "test_r2": model.get("metrics", {}).get("test_r2"),
+        }
+
+    explanation_result = dict(task["result"])
+    if model_selection:
+        explanation_result["selected_model"] = model_selection
+    answer = result_interpreter.explain(explanation_result)
+    if model_selection and task_data.get("intent") == TaskIntent.PREDICT_TRAIT.value:
+        metrics = model_selection["test_r2"]
+        metric_text = f"；训练任务测试集 R² 为 {metrics:.3f}" if isinstance(metrics, (int, float)) else ""
+        answer = (
+            f"本次预测使用模型“{model_selection['model_name']}”"
+            f"（模型 ID：{model_selection['model_id']}，训练任务：{model_selection['training_task_id']}，"
+            f"{'自动选择' if model_selection['selection'] == 'automatic' else '手动选择'}"
+            f"{metric_text}）。{answer}"
+        )
+    return {"task_id": task_id, "answer": answer, "model_selection": model_selection}
 
 
 @app.get("/api/v1/tasks/{task_id}/artifacts/{filename}")
@@ -854,6 +984,8 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
     recent = state.get("recent_dataset_ids", [])
     if any(word in text for word in ("上一个数据", "前一个数据", "之前的数据")) and len(recent) > 1:
         return by_id.get(recent[1])
+    # A dataset explicitly named in the message or a relative-history request
+    # takes precedence over the UI selection.
     for item in datasets:
         if item.get("name") and item["name"].lower() in text:
             return item
@@ -861,9 +993,6 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
     for item in datasets:
         normalized_name = re.sub(r"(示例|数据集|数据|[\s_-])", "", item.get("name", "").lower())
         if normalized_name and normalized_name in normalized_text:
-            return item
-        trait = item.get("trait", "").lower()
-        if trait and trait in text:
             return item
     species_terms = {
         "rice": ("水稻", "rice", "oryza"),
@@ -879,4 +1008,8 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
         if dataset is None:
             raise HTTPException(status_code=404, detail="数据集不存在或不属于当前用户")
         return dataset
+    for item in datasets:
+        trait = item.get("trait", "").lower()
+        if trait and trait in text:
+            return item
     return by_id.get(state.get("active_dataset_id"))

@@ -55,13 +55,14 @@
           <summary class="context-summary"><div><p class="kicker">DATA CONTEXT</p><h3>当前数据</h3></div><span id="dataset-panel-summary" class="panel-summary">未选择</span></summary>
           <label class="dataset-picker">选择数据集<select id="dataset-select"><option value="">请选择或上传数据</option></select></label>
           <div id="dataset-summary" class="dataset-summary empty">选择数据后将在这里显示物种、性状和规模。</div>
-          <details id="dataset-inspection" class="foldout"><summary>数据详情与质量</summary><div id="dataset-inspection-result" class="dataset-summary empty">展开后检查样本匹配、缺失、重复和 SNP 格式。</div></details>
+          <details id="dataset-inspection" class="foldout"><summary><span>数据详情与质量</span><button id="refresh-inspection" class="icon-button" type="button" title="重新检查当前数据">刷新检查</button></summary><div id="dataset-inspection-result" class="dataset-summary empty">选择数据集后自动检查，或点击“刷新检查”。</div></details>
           <details id="upload-details" class="foldout"><summary>上传新数据</summary>
             <form id="upload-form">
-              <label>数据集名称<input id="dataset-name" placeholder="例如 2026 水稻株高试验" required></label>
-              <div class="field-row"><label>物种<input id="species" placeholder="例如 水稻" required></label><label>性状名称<input id="trait" name="trait" placeholder="例如 plant_height" required></label></div>
               <label>基因型文件<input id="genotype" type="file" accept=".csv" required></label>
-              <label>表型文件<input id="phenotype" type="file" accept=".csv" required></label>
+              <label>表型文件<input id="phenotype" type="file" accept=".csv" required><small id="trait-detection" class="field-help">系统将从表型文件列名识别性状，识别后仍可修改。</small></label>
+              <label>物种<select id="upload-species" required><option value="">请选择物种</option><option>Oryza sativa (rice)</option><option>Triticum aestivum (wheat)</option><option>Zea mays (maize)</option><option>Glycine max (soybean)</option><option>Hordeum vulgare (barley)</option><option>Sorghum bicolor (sorghum)</option><option>Brassica napus (rapeseed)</option><option>Gossypium hirsutum (cotton)</option><option>Solanum lycopersicum (tomato)</option><option>Arabidopsis thaliana</option><option value="__custom__">其他物种</option></select><input id="upload-species-custom" class="hidden" placeholder="输入物种名称"></label>
+              <label>性状名称<input id="upload-trait" name="trait" list="upload-trait-options" placeholder="选择表型文件后自动识别" required><datalist id="upload-trait-options"></datalist></label>
+              <label>数据集名称<input id="upload-dataset-name" placeholder="选择物种和表型文件后自动推荐" required><small class="field-help">系统会生成“物种_性状_日期”，也可以自行修改。</small></label>
               <button class="button secondary" type="submit">上传并设为当前数据 <span>-></span></button>
             </form>
           </details>
@@ -96,6 +97,6 @@
     </section>
   </main>
   <dialog id="task-confirm" class="confirm-dialog"><h3>确认开始长任务</h3><p id="confirm-summary"></p><p class="field-help">任务会在后台执行，可以离开页面后再从历史会话中查看。</p><div class="dialog-actions"><button id="cancel-run" class="button secondary" type="button">返回修改</button><button id="confirm-run" class="button primary" type="button">开始运行</button></div></dialog>
-  <script src="/app/app.js?v=20260909-2"></script>
+  <script src="/app/app.js?v=20260909-9"></script>
 </body>
 </html>
