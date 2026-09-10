@@ -35,15 +35,19 @@ def build_quality_report(task: MenetTask, result: Dict[str, Any]) -> Dict[str, A
         test_r2 = float(metrics.get("test_r2", 0))
         level = "pass" if test_r2 >= 0.3 else "warning" if test_r2 >= 0 else "fail"
         checks.append(_check("test_r2", level, "测试集泛化表现", f"测试集 R² 为 {test_r2:.3f}。", "结合基线、重复划分和育种目标判断是否可用。"))
-        baseline = metrics.get("baseline") or {}
-        if "test_r2" in baseline:
-            baseline_r2 = float(baseline["test_r2"])
-            gain = test_r2 - baseline_r2
-            level = "pass" if gain > 0 else "warning"
+        baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
+        comparisons = []
+        for method, baseline in baselines.items():
+            if not isinstance(baseline, dict) or "test_r2" not in baseline:
+                continue
+            gain = test_r2 - float(baseline["test_r2"])
+            comparisons.append(f"{method} R² {float(baseline['test_r2']):.3f}，差值 {gain:+.3f}")
+        if comparisons:
+            level = "pass" if any("差值 +" in item and not item.endswith("+0.000") for item in comparisons) else "warning"
             checks.append(_check(
-                "baseline_comparison", level, "与岭回归基线比较",
-                f"MENET 相对基线的测试集 R² 差值为 {gain:.3f}（基线 {baseline_r2:.3f}）。",
-                "若 MENET 未超过基线，应优先检查数据划分、超参数和样本规模。",
+                "baseline_comparison", level, "与传统机器学习基线比较",
+                "；".join(comparisons) + "。",
+                "结合相同测试集、重复划分和样本规模判断模型差异，不将单次提升视为显著性结论。",
             ))
     if history:
         best = max(history, key=lambda item: float(item.get("val_r2", float("-inf"))))

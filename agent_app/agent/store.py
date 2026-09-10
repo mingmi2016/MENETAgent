@@ -209,7 +209,9 @@ class TaskStore:
         )
         model_id = f"model_{task['task_id'].removeprefix('task_')}"
         now = self._now()
-        default_name = f"{task['trait']} · {now[:10]}"
+        epochs = task.get("epochs") or (task.get("metadata", {}).get("training_config", {}) or {}).get("epochs") or "默认"
+        short_id = task["task_id"].removeprefix("task_")[:6]
+        default_name = f"{task['trait']}_{now[:10]}_{epochs}轮_{short_id}"
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO trained_models(model_id,task_id,user_id,name,trait,dataset_id,dataset_dir,output_dir,"

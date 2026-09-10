@@ -262,7 +262,7 @@ class ResultInterpreter:
         if self.client.enabled:
             try:
                 return self.client.complete_json(
-                    "Explain the MENET result in concise Chinese. Do not invent values. Return JSON with an answer string and caveats array.",
+                    "Explain the MENET result in concise Chinese. Do not invent values. If the result contains baselines, explicitly report every available baseline among genomic_ridge, random_forest, and xgboost with its test R², and compare MENET against each. Return JSON with an answer string and caveats array.",
                     json.dumps(result, ensure_ascii=False),
                 ).get("answer", "")
             except Exception:
@@ -274,10 +274,31 @@ class ResultInterpreter:
             validation = next((step.get("data", {}) for step in steps if step.get("name") == "validate_dataset"), {})
             metrics = next((step.get("data", {}) for step in reversed(steps) if step.get("data", {}).get("test_r2") is not None), {})
             if metrics:
+                baseline_data = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
+                labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+                comparisons = []
+                for method, baseline in baseline_data.items():
+                    if isinstance(baseline, dict) and "test_r2" in baseline:
+                        r2 = float(baseline["test_r2"])
+                        comparisons.append(f"{labels.get(method, method)} R² 为 {r2:.3f}，MENET 差值 {float(metrics['test_r2']) - r2:+.3f}")
+                    elif isinstance(baseline, dict) and baseline.get("status") == "unavailable":
+                        comparisons.append(f"{labels.get(method, method)} 当前不可用")
+                comparison_text = "；".join(comparisons)
+                available = [(method, float(item["test_r2"])) for method, item in baseline_data.items() if isinstance(item, dict) and "test_r2" in item]
+                best_method, best_r2 = max(available, key=lambda item: item[1]) if available else (None, None)
+                menet_r2 = float(metrics["test_r2"])
+                if best_method and best_r2 > menet_r2 + 0.05:
+                    recommendation = f"当前划分下建议优先使用{labels.get(best_method, best_method)}进行预测；MENET 可保留作对照，正式选择前建议重复验证。"
+                elif best_method:
+                    recommendation = "当前各模型差距不大，暂不做强制推荐，建议通过重复划分或交叉验证后再确定默认模型。"
+                else:
+                    recommendation = "暂时没有足够的基线结果，无法给出模型推荐。"
                 return (
-                    f"分析完成。测试集 R² 为 {float(metrics['test_r2']):.3f}，"
+                    f"分析完成。MENET 测试集 R² 为 {menet_r2:.3f}，"
                     f"测试损失为 {float(metrics.get('test_loss', 0)):.3f}。"
-                    "R² 需要结合数据划分、重复训练和育种场景判断，不能直接视为因果证据。"
+                    + (f"基线比较：{comparison_text}。" if comparison_text else "")
+                    + f"模型建议：{recommendation}"
+                    + "R² 需要结合数据划分、重复训练和育种场景判断，不能直接视为因果证据。"
                 )
             if validation:
                 return (

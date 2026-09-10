@@ -761,6 +761,31 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
     if model_selection:
         explanation_result["selected_model"] = model_selection
     answer = result_interpreter.explain(explanation_result)
+    # Keep the baseline comparison visible even when an LLM summary is enabled.
+    if task_data.get("intent") in {TaskIntent.TRAIN_MODEL.value, TaskIntent.GENERATE_REPORT.value}:
+        metric_steps = [step.get("data", {}) for step in task["result"].get("steps", [])]
+        metrics = next((item for item in reversed(metric_steps) if item.get("baselines") or item.get("baseline")), {})
+        baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
+        labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+        baseline_lines = []
+        menet_r2 = metrics.get("test_r2")
+        for method, baseline in baselines.items():
+            if isinstance(baseline, dict) and "test_r2" in baseline:
+                value = float(baseline["test_r2"])
+                gain = float(menet_r2) - value if menet_r2 is not None else None
+                baseline_lines.append(f"{labels.get(method, method)} R²={value:.3f}" + (f"，MENET 差值 {gain:+.3f}" if gain is not None else ""))
+            elif isinstance(baseline, dict) and baseline.get("status") == "unavailable":
+                baseline_lines.append(f"{labels.get(method, method)}当前不可用")
+        if baseline_lines:
+            answer += "\n基线比较：" + "；".join(baseline_lines) + "。"
+            available = [(method, float(item["test_r2"])) for method, item in baselines.items() if isinstance(item, dict) and "test_r2" in item]
+            if available and menet_r2 is not None:
+                best_method, best_r2 = max(available, key=lambda item: item[1])
+                labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+                if best_r2 > float(menet_r2) + 0.05:
+                    answer += f"\n模型建议：当前单次数据划分下，建议优先使用{labels.get(best_method, best_method)}进行预测；MENET 可保留作对照，正式选择前建议重复验证。"
+                else:
+                    answer += "\n模型建议：当前单次数据划分下各模型差距不大，建议重复验证后再确定默认模型。"
     if model_selection and task_data.get("intent") == TaskIntent.PREDICT_TRAIT.value:
         metrics = model_selection["test_r2"]
         metric_text = f"；训练任务测试集 R² 为 {metrics:.3f}" if isinstance(metrics, (int, float)) else ""

@@ -2,6 +2,7 @@ import torch
 import copy
 from datetime import datetime
 from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 import numpy as np
 import json
@@ -121,24 +122,64 @@ def evaluate_menet(model, dataloader, loss_fn, device):
     return avg_loss, r2, y_preds, y_trues
 
 
-def evaluate_ridge_baseline(train_loader, test_loader, alpha=1.0):
-    """Fit a deterministic genomic ridge baseline on the same split as MENET."""
+def _baseline_arrays(train_loader, test_loader):
     train_x, _, train_y = train_loader.dataset.tensors
     test_x, _, test_y = test_loader.dataset.tensors
-    train_x = train_x.detach().cpu().numpy().reshape(len(train_x), -1)
-    test_x = test_x.detach().cpu().numpy().reshape(len(test_x), -1)
-    train_y = train_y.detach().cpu().numpy().reshape(-1)
-    test_y = test_y.detach().cpu().numpy().reshape(-1)
+    return (
+        train_x.detach().cpu().numpy().reshape(len(train_x), -1),
+        test_x.detach().cpu().numpy().reshape(len(test_x), -1),
+        train_y.detach().cpu().numpy().reshape(-1),
+        test_y.detach().cpu().numpy().reshape(-1),
+    )
+
+
+def _baseline_metrics(method, predictions, truths, train_count, test_count, **params):
+    return {
+        "method": method,
+        **params,
+        "test_r2": float(r2_score(truths, predictions)),
+        "test_mae": float(mean_absolute_error(truths, predictions)),
+        "train_sample_count": int(train_count),
+        "test_sample_count": int(test_count),
+    }
+
+
+def evaluate_ridge_baseline(train_loader, test_loader, alpha=1.0):
+    """Fit a deterministic genomic ridge baseline on the same split as MENET."""
+    train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
     model = Ridge(alpha=alpha, solver="lsqr", max_iter=1000)
     model.fit(train_x, train_y)
-    predictions = model.predict(test_x)
+    return _baseline_metrics("genomic_ridge", model.predict(test_x), test_y, len(train_y), len(test_y), alpha=float(alpha))
+
+
+def evaluate_random_forest_baseline(train_loader, test_loader, random_state=42):
+    """Fit a bounded random forest baseline on the same split as MENET."""
+    train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
+    model = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1, max_features="sqrt")
+    model.fit(train_x, train_y)
+    return _baseline_metrics("random_forest", model.predict(test_x), test_y, len(train_y), len(test_y), n_estimators=300, random_state=random_state)
+
+
+def evaluate_xgboost_baseline(train_loader, test_loader, random_state=42):
+    """Fit XGBoost when the optional dependency is installed."""
+    try:
+        from xgboost import XGBRegressor
+    except ImportError:
+        return {"method": "xgboost", "status": "unavailable", "error": "未安装 xgboost"}
+    train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
+    model = XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.03, subsample=0.8,
+                         colsample_bytree=0.8, objective="reg:squarederror", random_state=random_state,
+                         n_jobs=-1, tree_method="hist")
+    model.fit(train_x, train_y, verbose=False)
+    return _baseline_metrics("xgboost", model.predict(test_x), test_y, len(train_y), len(test_y),
+                             n_estimators=300, max_depth=4, learning_rate=0.03, random_state=random_state)
+
+
+def evaluate_baselines(train_loader, test_loader, random_state=42):
     return {
-        "method": "genomic_ridge",
-        "alpha": float(alpha),
-        "test_r2": float(r2_score(test_y, predictions)),
-        "test_mae": float(mean_absolute_error(test_y, predictions)),
-        "train_sample_count": int(len(train_y)),
-        "test_sample_count": int(len(test_y)),
+        "genomic_ridge": evaluate_ridge_baseline(train_loader, test_loader),
+        "random_forest": evaluate_random_forest_baseline(train_loader, test_loader, random_state),
+        "xgboost": evaluate_xgboost_baseline(train_loader, test_loader, random_state),
     }
 
 def train_menet(config, model, train_loader, val_loader, test_loader, criterion, tensor_for_ig, windows=None):
@@ -178,11 +219,13 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
     np.savetxt(predictions_path, np.column_stack((truths, predictions)), delimiter=",",
                header="true,predicted", comments="")
     try:
-        ridge = evaluate_ridge_baseline(train_loader, test_loader)
+        baselines = evaluate_baselines(train_loader, test_loader)
     except Exception as exc:
-        ridge = {"method": "genomic_ridge", "status": "failed", "error": str(exc)}
+        baselines = {"status": "failed", "error": str(exc)}
+    ridge = baselines.get("genomic_ridge", {}) if isinstance(baselines, dict) else {}
     metrics = {"test_loss": float(test_loss), "test_r2": float(test_r2),
                "baseline": ridge,
+               "baselines": baselines,
                "r2_gain_vs_baseline": (
                    float(test_r2 - ridge["test_r2"]) if "test_r2" in ridge else None
                ),
