@@ -84,3 +84,42 @@ Every completed workflow writes `quality_report.json`. Deterministic checks curr
 The **重复验证** action submits 2–5 independent runs with different split and training seeds. Runs reuse the selected model's trait, dataset, epoch count and split ratios, and each seed is recorded in `task.json`. The default single GPU worker executes them sequentially to avoid concurrent GPU memory exhaustion.
 
 The current development target is this WSL workstation. Generic installers, server multi-tenancy and a C++ wrapper are deferred until the local Agent and MCP workflows are complete.
+
+## Deployment on the LSF cluster
+
+On the cluster, the login node provides the Web/API/MCP service. MENET training is submitted by LSF and runs on `gpu01`; the login node does not run GPU training.
+
+Create `agent_app/.env` from `.env.example` and choose the queue backend with `MENET_QUEUE_BACKEND`:
+
+```bash
+# thread (default), celery, or lsf
+MENET_QUEUE_BACKEND=lsf
+
+MENET_AGENT_ROOT=/data/user_home/xtcgroup/huawei/MenetAgent/agent_app
+MENET_AGENT_DB=runs/agent.db
+MENET_CORE_ROOT=/data/user_home/xtcgroup/huawei/MenetAgent/MENET
+
+# Python used by the login-node Web/API service
+MENET_PYTHON=/data/user_home/xtcgroup/huawei/envs/menet-web/bin/python
+
+# Python used inside the LSF GPU allocation
+MENET_LSF_PYTHON=/data/user_home/xtcgroup/huawei/envs/torch_gpu/bin/python
+MENET_LSF_QUEUE=gpu
+MENET_LSF_HOST=gpu01
+MENET_LSF_WALLTIME=24:00
+```
+
+The backend settings are backward-compatible:
+
+- `MENET_QUEUE_BACKEND=thread` keeps the original in-process thread executor.
+- `MENET_QUEUE_BACKEND=celery` keeps the existing Redis/Celery path.
+- `MENET_QUEUE_BACKEND=lsf` submits `bsub -q gpu -m gpu01 -gpu "num=1"` jobs and uses `bjobs`/`bkill` for status and cancellation.
+
+Start the Web service from the login node:
+
+```bash
+cd /data/user_home/xtcgroup/huawei/MenetAgent/agent_app
+bash scripts/start_agent.sh
+```
+
+`start_agent.sh` loads `agent_app/.env` when it exists. The Web/API process uses `menet-web`; submitted GPU workers use `torch_gpu`. Do not create a `.venv` on the server for this deployment. The local workstation may continue to use its own `.venv`.

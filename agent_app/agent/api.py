@@ -28,6 +28,7 @@ from .llm import (
 )
 from .store import DEFAULT_USER_ID, TaskStore
 from .runner import run_task
+from .lsf_executor import LSFExecutor, LSFError
 from .demo_data import register_demo_datasets
 from .quality import build_quality_report
 from .tools import MenetTools
@@ -729,6 +730,13 @@ def cancel_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     output = Path(task["task"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     (output / "cancel.requested").write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf":
+        job_id = LSFExecutor(service_root, str(store.path)).job_id(str(output))
+        if job_id:
+            try:
+                LSFExecutor(service_root, str(store.path)).cancel(job_id)
+            except LSFError as exc:
+                raise HTTPException(status_code=502, detail=f"LSF 取消失败: {exc}") from exc
     return {"task_id": task_id, "status": "cancel_requested", "message": "已请求停止；当前轮次结束后生效。"}
 
 
@@ -826,7 +834,16 @@ def list_artifacts(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, An
 
 
 def _submit_task(task: MenetTask) -> None:
-    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "celery":
+    backend = os.environ.get("MENET_QUEUE_BACKEND", "thread").lower()
+    if backend == "lsf":
+        try:
+            job_id = LSFExecutor(service_root, str(store.path)).submit(task.to_dict())
+            (Path(task.output_dir) / ".lsf_job_id").write_text(job_id, encoding="utf-8")
+            return
+        except Exception as exc:
+            store.update(task.task_id, "failed", {"task_id": task.task_id, "status": "failed", "errors": [f"LSF任务提交失败: {exc}"]})
+            return
+    if backend == "celery":
         try:
             from .celery_app import run_task as celery_task
             celery_task.delay(task.to_dict())
@@ -923,6 +940,12 @@ def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:
         "execution_seconds": execution_seconds,
         "terminal": terminal,
     }
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf":
+        lsf = LSFExecutor(service_root, str(store.path))
+        job_id = lsf.job_id(task.get("output_dir", ""))
+        if job_id:
+            runtime["lsf_job_id"] = job_id
+            runtime["lsf_status"] = lsf.status(job_id)
     progress_path = Path(task.get("output_dir", "")) / "progress.json"
     if progress_path.is_file():
         try:
