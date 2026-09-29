@@ -68,6 +68,27 @@ def test_llm_prediction_does_not_require_training_only_fields():
     assert parsed.missing_fields == []
 
 
+def test_llm_can_classify_model_inventory_request():
+    class FakeClient:
+        enabled = True
+        model = "test-model"
+
+        @staticmethod
+        def complete_json(_system_prompt, _message):
+            return {
+                "intent": "list_models",
+                "arguments": {},
+                "missing_fields": [],
+                "confidence": 0.96,
+            }
+
+    parser = AgentIntentParser(client=FakeClient())
+    parsed = parser.parse("现在有几个模型可以供来预测")
+    assert parsed.intent == TaskIntent.LIST_MODELS
+    assert parsed.missing_fields == []
+    assert parser.last_source["type"] == "llm"
+
+
 def test_menet_task_normalizes_gpu_device_alias():
     task = MenetTask(trait="culmlength", device="GPU")
     assert task.device == "cuda"

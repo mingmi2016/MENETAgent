@@ -44,6 +44,20 @@ Codex/Claude -> 本地 MCP Server -> 同一套 MENET 工作流
 
 Web Agent 的 LLM 设置必须在界面中可见，包括启用状态、服务类型、服务地址、意图识别模型、结果分析模型、连接测试和规则降级状态。意图模型承担高频分类和参数抽取，分析模型承担结果解释和复杂科研问答。本地 Ollama 无需 API Key；第三方服务的密钥只保存在被 Git 忽略的本地配置中。配置失败时不能影响确定性 MENET 工作流。
 
+### LLM 解释原则：结构化证据 + Harness
+
+LLM 不仅用于训练结果解释，也应参与数据检查、质量判断和科研问答。工具层负责读取文件、计算样本数、SNP 数、匹配率、缺失率、重复样本和错误信息；LLM 负责在这些结构化证据之上组织自然语言解释。每类任务必须通过专用 harness 调用：输入明确包含 `task_intent`、允许使用的证据字段和任务目标，输出必须符合约定的 JSON Schema，并经过服务端校验后才能展示给用户。数据检查 harness 严禁生成 R²、基线排名或输入中不存在的数字；模型性能 harness 才允许解释 R² 和基线比较。LLM 不可用或输出不合规时才降级到规则解释，并在界面明确显示实际来源，不能把规则结果伪装成 LLM 结果。
+
+### 模型推荐：LLM 提议、程序校验、程序执行
+
+模型训练完成后，系统保存 MENET、基因组岭回归、随机森林和 XGBoost 的结构化评估结果。自动预测时，将同一数据划分下的指标、重复验证状态和可用模型信息交给模型服务，由 LLM 输出固定 JSON 格式的推荐方法、MENET 对照方法、置信度、理由和是否需要重复验证。
+
+程序会校验推荐方法是否存在、是否具有真实评估指标、是否属于当前数据集和性状；推荐无效时才使用结构化结果降级。只有通过校验的推荐才会进入预测执行，程序负责加载对应模型文件并生成预测，LLM 不直接操作模型文件，也不能修改评估指标。预测结果明确区分主要预测模型和 MENET 对照，不进行未经验证的平均或加权集成。
+
+### 自然语言入口原则
+
+网页聊天中的用户输入统一先经过意图解析 Harness。`list_models`、`inspect_data`、`train_model`、`predict_trait`、`evaluate_model`、`explain_model` 和 `generate_report` 都属于显式意图协议；数据集名称、模型 ID、性状和训练参数作为结构化参数提取，再由程序对数据库记录和路径进行解析。API 层不能用关键词分支替代意图识别。只有登录、权限、文件格式、路径安全和参数类型校验等确定性边界不交给 LLM。模型服务不可用时才使用规则解析，并在回复中标明降级来源。
+
 ## MCP Server and External AI
 
 MCP 不是第二个 Agent。使用网页时，MENET Agent 内部可以结合 LLM；使用 Codex 或 Claude 时，外部 AI 已经提供 LLM、规划和对话上下文，MENET MCP Server 只提供可靠的领域工具。
@@ -410,6 +424,18 @@ Supervisor
 ### Event-Driven Agent
 
 工具完成后发出事件，例如 `DatasetValidated`、`MenetTrainingCompleted` 和 `ReportGenerated`，下一个步骤订阅事件后执行。适合后期分布式和高并发部署。
+
+### 执行后端与运行环境
+
+执行后端采用配置驱动方式，不根据机器类型、`bsub` 或 Redis 的存在情况自动猜测。部署时通过环境变量选择：
+
+```text
+MENET_QUEUE_BACKEND=thread  # 本地进程内线程池，默认
+MENET_QUEUE_BACKEND=celery  # Redis/Celery 异步 Worker
+MENET_QUEUE_BACKEND=lsf     # 通过 bsub 提交到 LSF 集群
+```
+
+因此本地 WSL 和服务器可以使用同一套代码，只需提供不同的 `.env` 配置。`MENET_QUEUE_BACKEND` 决定任务由哪种执行后端承载；`device=auto` 则在任务真正运行的进程中由 PyTorch 判断 CUDA 是否可用，两者不能混为一谈。
 
 ## 10. 适合参考的实现
 

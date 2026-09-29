@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .auth import hash_password, token_digest, verify_password, new_session_token
+
 DEFAULT_USER_ID = "user_local"
 
 
@@ -19,10 +21,24 @@ class TaskStore:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
+                    username TEXT UNIQUE,
                     display_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT 'user',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    last_login_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     deleted_at TEXT
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT
                 )
             """)
             connection.execute("""
@@ -99,6 +115,11 @@ class TaskStore:
             self._ensure_column(connection, "tasks", "user_id", "TEXT NOT NULL DEFAULT 'user_local'")
             self._ensure_column(connection, "tasks", "started_at", "TEXT")
             self._ensure_column(connection, "tasks", "finished_at", "TEXT")
+            self._ensure_column(connection, "users", "username", "TEXT")
+            self._ensure_column(connection, "users", "password_hash", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+            self._ensure_column(connection, "users", "is_active", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "users", "last_login_at", "TEXT")
             self._ensure_column(connection, "datasets", "user_id", "TEXT NOT NULL DEFAULT 'user_local'")
             self._ensure_column(connection, "datasets", "name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "datasets", "species", "TEXT NOT NULL DEFAULT ''")
@@ -111,14 +132,17 @@ class TaskStore:
             self._ensure_column(connection, "conversations", "deleted_at", "TEXT")
             now = self._now()
             connection.execute(
-                "INSERT OR IGNORE INTO users(user_id,display_name,created_at,updated_at) VALUES(?,?,?,?)",
-                (DEFAULT_USER_ID, "本地用户", now, now),
+                "INSERT OR IGNORE INTO users(user_id,username,display_name,password_hash,role,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (DEFAULT_USER_ID, "local", "本地用户", "", "admin", 1, now, now),
             )
+            connection.execute("UPDATE users SET username='local' WHERE user_id=? AND (username IS NULL OR username='')", (DEFAULT_USER_ID,))
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_created ON tasks(user_id,created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_datasets_user_created ON datasets(user_id,created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id,updated_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id,created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_models_user_created ON trained_models(user_id,created_at)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)")
 
     def create_user(self, display_name: str) -> Dict[str, Any]:
         display_name = display_name.strip()
@@ -133,15 +157,79 @@ class TaskStore:
             )
         return self.get_user(user_id) or {"user_id": user_id, "display_name": display_name}
 
+    def create_account(self, username: str, password: str, display_name: str, role: str = "user") -> Dict[str, Any]:
+        username = username.strip().lower()
+        display_name = display_name.strip()
+        if not username or not display_name:
+            raise ValueError("用户名和显示名称不能为空")
+        if not username.replace("_", "").replace("-", "").replace(".", "").isalnum():
+            raise ValueError("用户名只能包含字母、数字、下划线、短横线或点")
+        password_hash = hash_password(password)
+        user_id = f"user_{uuid4().hex[:12]}"
+        now = self._now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO users(user_id,username,display_name,password_hash,role,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (user_id, username, display_name, password_hash, role, 1, now, now),
+            )
+        return self.get_user(user_id) or {"user_id": user_id, "username": username, "display_name": display_name, "role": role}
+
+    def authenticate(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+        username = username.strip().lower()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE username=? AND is_active=1 AND deleted_at IS NULL", (username,)).fetchone()
+            if row is None or not verify_password(password, row["password_hash"]):
+                return None
+            now = self._now()
+            connection.execute("UPDATE users SET last_login_at=?,updated_at=? WHERE user_id=?", (now, now, row["user_id"]))
+        return self.get_user(row["user_id"])
+
+    def create_session(self, user_id: str, ttl_hours: int = 24) -> tuple[str, str]:
+        from datetime import timedelta
+        token = new_session_token()
+        now_dt = datetime.now(timezone.utc)
+        expires_dt = now_dt + timedelta(hours=ttl_hours)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+                (token_digest(token), user_id, now_dt.isoformat(), expires_dt.isoformat()),
+            )
+        return token, expires_dt.isoformat()
+
+    def get_session_user(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token:
+            return None
+        now = self._now()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT u.* FROM sessions s JOIN users u ON u.user_id=s.user_id "
+                "WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.is_active=1 AND u.deleted_at IS NULL",
+                (token_digest(token), now),
+            ).fetchone()
+        return self._public_user(row) if row else None
+
+    def revoke_session(self, token: str) -> None:
+        if token:
+            with self._connect() as connection:
+                connection.execute("UPDATE sessions SET revoked_at=? WHERE token_hash=?", (self._now(), token_digest(token)))
+
+    @staticmethod
+    def _public_user(row: Any) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        value = dict(row)
+        value.pop("password_hash", None)
+        return value
+
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-        return dict(row) if row else None
+            row = connection.execute("SELECT * FROM users WHERE user_id=? AND deleted_at IS NULL", (user_id,)).fetchone()
+        return self._public_user(row)
 
     def list_users(self) -> list:
         with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM users ORDER BY created_at").fetchall()
-        return [dict(row) for row in rows]
+            rows = connection.execute("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at").fetchall()
+        return [self._public_user(row) for row in rows]
 
     def create(self, task: Dict[str, Any]) -> None:
         now = self._now()

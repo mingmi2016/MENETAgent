@@ -6,6 +6,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 import numpy as np
 import json
+import joblib
 from pathlib import Path
 from utils.ig import ig_analysis
 
@@ -144,23 +145,30 @@ def _baseline_metrics(method, predictions, truths, train_count, test_count, **pa
     }
 
 
-def evaluate_ridge_baseline(train_loader, test_loader, alpha=1.0):
+def evaluate_ridge_baseline(train_loader, test_loader, alpha=1.0, model_path=None):
     """Fit a deterministic genomic ridge baseline on the same split as MENET."""
     train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
     model = Ridge(alpha=alpha, solver="lsqr", max_iter=1000)
     model.fit(train_x, train_y)
-    return _baseline_metrics("genomic_ridge", model.predict(test_x), test_y, len(train_y), len(test_y), alpha=float(alpha))
+    if model_path:
+        joblib.dump(model, model_path)
+    return _baseline_metrics("genomic_ridge", model.predict(test_x), test_y, len(train_y), len(test_y),
+                             alpha=float(alpha), model_path=str(model_path) if model_path else None)
 
 
-def evaluate_random_forest_baseline(train_loader, test_loader, random_state=42):
+def evaluate_random_forest_baseline(train_loader, test_loader, random_state=42, model_path=None):
     """Fit a bounded random forest baseline on the same split as MENET."""
     train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
     model = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1, max_features="sqrt")
     model.fit(train_x, train_y)
-    return _baseline_metrics("random_forest", model.predict(test_x), test_y, len(train_y), len(test_y), n_estimators=300, random_state=random_state)
+    if model_path:
+        joblib.dump(model, model_path)
+    return _baseline_metrics("random_forest", model.predict(test_x), test_y, len(train_y), len(test_y),
+                             n_estimators=300, random_state=random_state,
+                             model_path=str(model_path) if model_path else None)
 
 
-def evaluate_xgboost_baseline(train_loader, test_loader, random_state=42):
+def evaluate_xgboost_baseline(train_loader, test_loader, random_state=42, model_path=None):
     """Fit XGBoost when the optional dependency is installed."""
     try:
         from xgboost import XGBRegressor
@@ -171,15 +179,24 @@ def evaluate_xgboost_baseline(train_loader, test_loader, random_state=42):
                          colsample_bytree=0.8, objective="reg:squarederror", random_state=random_state,
                          n_jobs=-1, tree_method="hist")
     model.fit(train_x, train_y, verbose=False)
+    if model_path:
+        joblib.dump(model, model_path)
     return _baseline_metrics("xgboost", model.predict(test_x), test_y, len(train_y), len(test_y),
-                             n_estimators=300, max_depth=4, learning_rate=0.03, random_state=random_state)
+                             n_estimators=300, max_depth=4, learning_rate=0.03, random_state=random_state,
+                             model_path=str(model_path) if model_path else None)
 
 
-def evaluate_baselines(train_loader, test_loader, random_state=42):
+def evaluate_baselines(train_loader, test_loader, random_state=42, model_dir=None):
+    model_dir = Path(model_dir) if model_dir else None
+    if model_dir:
+        model_dir.mkdir(parents=True, exist_ok=True)
+    path = lambda name: model_dir / name if model_dir else None
     return {
-        "genomic_ridge": evaluate_ridge_baseline(train_loader, test_loader),
-        "random_forest": evaluate_random_forest_baseline(train_loader, test_loader, random_state),
-        "xgboost": evaluate_xgboost_baseline(train_loader, test_loader, random_state),
+        "genomic_ridge": evaluate_ridge_baseline(train_loader, test_loader, model_path=path("genomic_ridge_model.joblib")),
+        "random_forest": evaluate_random_forest_baseline(train_loader, test_loader, random_state,
+                                                          model_path=path("random_forest_model.joblib")),
+        "xgboost": evaluate_xgboost_baseline(train_loader, test_loader, random_state,
+                                              model_path=path("xgboost_model.joblib")),
     }
 
 def train_menet(config, model, train_loader, val_loader, test_loader, criterion, tensor_for_ig, windows=None):
@@ -219,7 +236,7 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
     np.savetxt(predictions_path, np.column_stack((truths, predictions)), delimiter=",",
                header="true,predicted", comments="")
     try:
-        baselines = evaluate_baselines(train_loader, test_loader)
+        baselines = evaluate_baselines(train_loader, test_loader, model_dir=output_dir)
     except Exception as exc:
         baselines = {"status": "failed", "error": str(exc)}
     ridge = baselines.get("genomic_ridge", {}) if isinstance(baselines, dict) else {}
@@ -230,7 +247,10 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
                    float(test_r2 - ridge["test_r2"]) if "test_r2" in ridge else None
                ),
                "device": str(device), "epochs": int(config["epoch"]),
-               "artifacts": [str(model_path), str(history_path), str(metrics_path), str(predictions_path)]}
+               "artifacts": [str(model_path), str(history_path), str(metrics_path), str(predictions_path)] + [
+                   item["model_path"] for item in baselines.values()
+                   if isinstance(item, dict) and item.get("model_path")
+               ]}
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2, default=float), encoding="utf-8")
     return metrics
 

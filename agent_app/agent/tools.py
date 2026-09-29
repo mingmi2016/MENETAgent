@@ -339,16 +339,94 @@ class MenetTools:
             model.to(config["device"]).eval()
             snp_tensor, gr_tensor, _ = prepare_tensors(phen_snp, phen_gr)
             with torch.no_grad():
-                predictions = model(snp_tensor.to(config["device"]), gr_tensor.to(config["device"]))
+                menet_predictions = model(snp_tensor.to(config["device"]), gr_tensor.to(config["device"]))
+            menet_predictions = menet_predictions.flatten().cpu().numpy()
+            metrics = json.loads((source_dir / "metrics.json").read_text(encoding="utf-8"))
+            selection = task.metadata.get("prediction_selection") or self._select_prediction_method(metrics)
+            if selection.get("primary_method") not in {"menet", "genomic_ridge", "random_forest", "xgboost"}:
+                selection = self._select_prediction_method(metrics)
+            if selection.get("primary_method") != "menet":
+                selected_metrics = metrics.get("baselines", {}).get(selection["primary_method"], {})
+                if not isinstance(selected_metrics, dict) or "test_r2" not in selected_metrics:
+                    selection = self._select_prediction_method(metrics)
+            primary_method = selection["primary_method"]
+            output = {"sample_id": common.astype(str)}
+            if primary_method == "menet":
+                output["recommended_menet_prediction"] = menet_predictions
+            else:
+                baseline_path = source_dir / f"{primary_method}_model.joblib"
+                if not baseline_path.is_file():
+                    self._rebuild_baseline_model(task, source_dir, primary_method, baseline_path)
+                import joblib
+                baseline_model = joblib.load(baseline_path)
+                features = genotype.loc[common].apply(pd.to_numeric, errors="raise").to_numpy()
+                output[f"recommended_{primary_method}_prediction"] = baseline_model.predict(features)
+                output["reference_menet_prediction"] = menet_predictions
             output_path = Path(task.output_dir) / "predictions.csv"
-            pd.DataFrame({"sample_id": common.astype(str), "predicted": predictions.flatten().cpu().numpy()}).to_csv(output_path, index=False)
+            pd.DataFrame(output).to_csv(output_path, index=False)
             return self._result(True, "completed", [], [], {
                 "sample_count": len(common),
                 "input_type": "new_genotype" if prediction_path else "current_dataset",
+                "prediction_selection": selection,
                 "artifacts": [str(output_path)],
             })
         except Exception as exc:
             return self._result(False, "failed", [f"表型预测失败: {exc}"], [])
+
+    @staticmethod
+    def _select_prediction_method(metrics: Dict[str, Any], threshold: float = 0.05) -> Dict[str, Any]:
+        menet_r2 = metrics.get("test_r2")
+        candidates = {"menet": float(menet_r2)} if isinstance(menet_r2, (int, float)) else {}
+        for method, item in (metrics.get("baselines") or {}).items():
+            if isinstance(item, dict) and isinstance(item.get("test_r2"), (int, float)):
+                candidates[method] = float(item["test_r2"])
+        if "menet" not in candidates:
+            return {"primary_method": "menet", "reason": "missing_comparable_metrics", "candidates": candidates,
+                    "minimum_r2_gain": threshold}
+        best_method, best_r2 = max(candidates.items(), key=lambda item: item[1])
+        gain = best_r2 - candidates["menet"]
+        primary_method = best_method if best_method != "menet" and gain > threshold else "menet"
+        return {
+            "primary_method": primary_method,
+            "primary_test_r2": candidates[primary_method],
+            "menet_test_r2": candidates["menet"],
+            "gain_over_menet": candidates[primary_method] - candidates["menet"],
+            "minimum_r2_gain": threshold,
+            "candidates": candidates,
+            "reason": "baseline_significantly_better" if primary_method != "menet" else "menet_or_no_clear_winner",
+        }
+
+    @staticmethod
+    def _rebuild_baseline_model(task: MenetTask, source_dir: Path, method: str, target_path: Path) -> None:
+        import joblib
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.linear_model import Ridge
+
+        training_root = source_dir / "input"
+        if not (training_root / "split" / "train_index.txt").is_file():
+            training_root = Path(task.dataset_dir)
+        genotype = pd.read_csv(training_root / "genotype" / "genotype.csv", index_col=0, comment="*")
+        phenotype = pd.read_csv(training_root / "phenotype" / f"{task.trait}.csv", index_col=0, comment="*")
+        train_ids = [line.strip() for line in (training_root / "split" / "train_index.txt").read_text(encoding="utf-8").splitlines() if line.strip()]
+        train_ids = [sample_id for sample_id in train_ids if sample_id in genotype.index and sample_id in phenotype.index]
+        train_x = genotype.loc[train_ids].apply(pd.to_numeric, errors="raise").to_numpy()
+        train_y = phenotype.loc[train_ids].iloc[:, 0].apply(pd.to_numeric, errors="raise").to_numpy()
+        snapshot_path = source_dir / "training_config.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.is_file() else {}
+        seed = int(snapshot.get("training_seed", 42))
+        if method == "genomic_ridge":
+            model = Ridge(alpha=1.0, solver="lsqr", max_iter=1000)
+        elif method == "random_forest":
+            model = RandomForestRegressor(n_estimators=300, random_state=seed, n_jobs=-1, max_features="sqrt")
+        elif method == "xgboost":
+            from xgboost import XGBRegressor
+            model = XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.03, subsample=0.8,
+                                 colsample_bytree=0.8, objective="reg:squarederror", random_state=seed,
+                                 n_jobs=-1, tree_method="hist")
+        else:
+            raise ValueError(f"不支持的预测方法: {method}")
+        model.fit(train_x, train_y)
+        joblib.dump(model, target_path)
 
     def evaluate_model(self, task: MenetTask) -> Dict[str, Any]:
         metrics_path = Path(task.source_output_dir or task.output_dir) / "metrics.json"

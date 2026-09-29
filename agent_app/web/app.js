@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let currentUserId = localStorage.getItem("menet_user_id") || "user_local";
+let authUser = null;
 let activeTaskId = "";
 let conversationId = null;
 let predictionGenotypePath = "";
@@ -143,12 +144,47 @@ async function request(url, options) {
   return data;
 }
 
+function showAuthDialog() {
+  $("auth-title").textContent = "登录 MENET Agent";
+  $("auth-error").classList.add("hidden");
+  const dialog = $("auth-dialog");
+  if (!dialog.open) dialog.showModal();
+  $("auth-username").focus();
+}
+
+function updateAuthUi() {
+  const loggedIn = Boolean(authUser?.authenticated);
+  $("auth-user").textContent = loggedIn ? authUser.display_name : "本地模式";
+  $("auth-user").classList.toggle("hidden", !loggedIn);
+  $("auth-login").classList.toggle("hidden", loggedIn);
+  $("auth-logout").classList.toggle("hidden", !loggedIn);
+  $("manage-users").classList.toggle("hidden", !(loggedIn && authUser.role === "admin"));
+}
+
+async function loadAuthState() {
+  try {
+    authUser = await request("/api/v1/auth/me");
+    currentUserId = authUser.user_id;
+    localStorage.setItem("menet_user_id", currentUserId);
+    updateAuthUi();
+    return true;
+  } catch (error) {
+    authUser = null;
+    updateAuthUi();
+    if (error.message.includes("请先登录")) {
+      showAuthDialog();
+      return false;
+    }
+    throw error;
+  }
+}
+
 function scrollConversation(behavior = "smooth") {
   const messages = $("messages");
   messages.scrollTo({ top: messages.scrollHeight, behavior });
 }
 
-function addMessage(text, role, scroll = true) {
+function addMessage(text, role, scroll = true, source = null) {
   const item = document.createElement("div");
   item.className = `message ${role}`;
   const avatar = document.createElement("span");
@@ -158,10 +194,21 @@ function addMessage(text, role, scroll = true) {
   const paragraph = document.createElement("p");
   paragraph.textContent = text;
   content.appendChild(paragraph);
+  if (role === "agent") renderResponseSource(content, source || { label: "规则引擎" });
   item.append(avatar, content);
   $("messages").appendChild(item);
   if (scroll) scrollConversation();
   return item;
+}
+
+function renderResponseSource(container, source) {
+  let element = container.querySelector(".response-source");
+  if (!element) {
+    element = document.createElement("small");
+    element.className = "response-source";
+    container.appendChild(element);
+  }
+  element.textContent = `来源：${source?.label || "规则引擎"}`;
 }
 
 function makeTaskMessage(taskId) {
@@ -325,8 +372,10 @@ async function renderTask(data, scroll = false) {
       try {
         const explanation = await request(`/api/v1/tasks/${encodeURIComponent(taskId)}/explanation?${userQuery()}`);
         result.querySelector(".result-explanation").textContent = explanation.answer;
+        renderResponseSource(result, explanation.response_source);
       } catch {
         result.querySelector(".result-explanation").textContent = "分析已完成，暂无文字解释。";
+        renderResponseSource(result, { label: "系统提示" });
       }
     } else {
       result.querySelector(".result-explanation").textContent = runtimeMessage(data);
@@ -441,12 +490,27 @@ async function saveLlmSettings() {
 
 async function loadUsers() {
   const data = await request("/api/v1/users");
-  if (!data.users.some((user) => user.user_id === currentUserId)) currentUserId = "user_local";
-  const select = $("user-select");
-  select.replaceChildren();
-  data.users.forEach((user) => select.appendChild(new Option(user.display_name, user.user_id)));
-  select.value = currentUserId;
-  localStorage.setItem("menet_user_id", currentUserId);
+  renderAdminUsers(data.users);
+}
+
+function renderAdminUsers(users) {
+  const list = $("user-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!users.length) {
+    list.textContent = "暂无用户账号";
+    return;
+  }
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>创建时间</th></tr></thead>";
+  const body = document.createElement("tbody");
+  users.forEach((user) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td>${user.username || "-"}</td><td>${user.display_name}</td><td>${user.role === "admin" ? "管理员" : "普通用户"}</td><td>${user.is_active ? "启用" : "停用"}</td><td>${new Date(user.created_at).toLocaleString()}</td>`;
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  list.appendChild(table);
 }
 
 async function loadDatasets(selectedId = "") {
@@ -619,7 +683,7 @@ async function restoreConversation(conversation) {
   ].sort((a, b) => new Date(a.at) - new Date(b.at));
 
   for (const event of events) {
-    if (event.kind === "message") addMessage(event.value.content, event.value.role, false);
+    if (event.kind === "message") addMessage(event.value.content, event.value.role, false, { label: "历史记录" });
     else {
       makeTaskMessage(event.value.task_id);
       await renderTask(event.value, false);
@@ -681,8 +745,9 @@ async function loadConversationHistory() {
 }
 
 async function initialize() {
+  if (!await loadAuthState()) return;
   await loadLlmSettings();
-  await loadUsers();
+  if (!authUser?.authenticated || authUser.role === "admin") await loadUsers();
   conversationId = localStorage.getItem(conversationKey());
   activeTaskId = localStorage.getItem(taskKey()) || "";
   let conversation;
@@ -723,6 +788,30 @@ async function initialize() {
 
 const appReady = initialize().catch((error) => notice(error.message, true));
 
+$("auth-login").addEventListener("click", () => showAuthDialog());
+$("auth-close").addEventListener("click", () => $("auth-dialog").close());
+$("auth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = { username: $("auth-username").value.trim(), password: $("auth-password").value };
+  try {
+    authUser = { ...(await request("/api/v1/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: payload.username, password: payload.password }) })).user, authenticated: true };
+    currentUserId = authUser.user_id;
+    localStorage.setItem("menet_user_id", currentUserId);
+    updateAuthUi();
+    $("auth-dialog").close();
+    window.location.reload();
+  } catch (error) {
+    $("auth-error").textContent = error.message;
+    $("auth-error").classList.remove("hidden");
+  }
+});
+$("auth-logout").addEventListener("click", async () => {
+  await request("/api/v1/auth/logout", { method: "POST" });
+  authUser = null;
+  updateAuthUi();
+  window.location.reload();
+});
+
 $("llm-status").addEventListener("click", () => {
   $("llm-panel").open = true;
   $("llm-panel").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -751,11 +840,6 @@ $("llm-test").addEventListener("click", async () => {
   } catch (error) {
     showLlmResult(error.message, true);
   }
-});
-
-$("user-select").addEventListener("change", (event) => {
-  localStorage.setItem("menet_user_id", event.target.value);
-  location.reload();
 });
 
 $("prediction-form").addEventListener("submit", async (event) => {
@@ -796,19 +880,27 @@ $("new-conversation").addEventListener("click", async () => {
   }
 });
 
-$("add-user").addEventListener("click", async () => {
-  const displayName = window.prompt("请输入本地用户名称");
-  if (!displayName?.trim()) return;
+$("manage-users").addEventListener("click", async () => {
+  $("user-dialog").showModal();
+  await loadUsers();
+});
+$("user-dialog-close").addEventListener("click", () => $("user-dialog").close());
+$("user-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const error = $("user-form-error");
+  error.classList.add("hidden");
   try {
-    const user = await request("/api/v1/users", {
+    await request("/api/v1/auth/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ display_name: displayName.trim() }),
+      body: JSON.stringify({ username: $("new-username").value.trim(), display_name: $("new-display-name").value.trim(), password: $("new-password").value, role: $("new-role").value }),
     });
-    localStorage.setItem("menet_user_id", user.user_id);
-    location.reload();
-  } catch (error) {
-    notice(error.message, true);
+    event.target.reset();
+    await loadUsers();
+    notice("用户已创建");
+  } catch (requestError) {
+    error.textContent = requestError.message;
+    error.classList.remove("hidden");
   }
 });
 
@@ -982,15 +1074,15 @@ $("chat-form").addEventListener("submit", async (event) => {
       await loadTask(activeTaskId, true);
       await loadConversationHistory();
     } else if (data.type === "needs_input") {
-      addMessage(`请补充：${(data.parsed?.missing_fields || []).join("、")}`, "agent");
+      addMessage(data.message || `请补充：${(data.parsed?.missing_fields || []).join("、")}`, "agent", true, data.response_source);
     } else if (data.type === "needs_model" || data.type === "model_list") {
-      addMessage(data.message, "agent");
+      addMessage(data.message, "agent", true, data.response_source);
       if (data.type === "model_list") {
         $("model-panel").open = true;
         await loadModels(selectedModelId);
       }
     } else {
-      addMessage(`任务参数无效：${(data.errors || []).join("；")}`, "agent");
+      addMessage(`任务参数无效：${(data.errors || []).join("；")}`, "agent", true, data.response_source);
     }
   } catch (error) {
     addMessage(`请求没有成功：${error.message}`, "agent");

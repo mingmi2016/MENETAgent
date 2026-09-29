@@ -12,7 +12,7 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -28,6 +28,7 @@ from .llm import (
 )
 from .store import DEFAULT_USER_ID, TaskStore
 from .runner import run_task
+from .lsf_executor import LSFExecutor, LSFError
 from .demo_data import register_demo_datasets
 from .quality import build_quality_report
 from .tools import MenetTools
@@ -65,6 +66,18 @@ class UserRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class AccountCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str = Field(min_length=1, max_length=80)
+    role: str = Field(default="user", pattern="^(user|admin)$")
+
+
 class ConversationRequest(BaseModel):
     user_id: str = DEFAULT_USER_ID
 
@@ -93,6 +106,37 @@ class LLMSettingsRequest(BaseModel):
 
 
 app = FastAPI(title="MENET Agent", version="0.1.0")
+AUTH_MODE = os.environ.get("MENET_AUTH_MODE", "optional").strip().lower()
+SESSION_COOKIE = os.environ.get("MENET_SESSION_COOKIE", "menet_session")
+SESSION_TTL_HOURS = max(1, int(os.environ.get("MENET_SESSION_TTL_HOURS", "24")))
+
+
+@app.middleware("http")
+async def authentication_middleware(request: Request, call_next):
+    if AUTH_MODE != "required" or request.url.path in {
+        "/health",
+        "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/me",
+        "/api/v1/auth/users",
+    } or not request.url.path.startswith("/api/v1/"):
+        return await call_next(request)
+    user = _session_user(request)
+    if user is None:
+        return Response(content=json.dumps({"detail": "请先登录"}, ensure_ascii=False), status_code=401, media_type="application/json")
+    requested_user_id = request.query_params.get("user_id")
+    if requested_user_id and requested_user_id != user["user_id"]:
+        return Response(content=json.dumps({"detail": "不能访问其他用户的数据"}, ensure_ascii=False), status_code=403, media_type="application/json")
+    if request.method in {"POST", "PUT", "PATCH"}:
+        body = await request.body()
+        if body:
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("user_id") and payload["user_id"] != user["user_id"]:
+                return Response(content=json.dumps({"detail": "不能使用其他用户身份提交任务"}, ensure_ascii=False), status_code=403, media_type="application/json")
+    return await call_next(request)
 service_root = Path(
     os.environ.get("MENET_AGENT_ROOT", Path(__file__).resolve().parents[1])
 ).resolve()
@@ -230,7 +274,11 @@ def test_llm_connection() -> Dict[str, Any]:
 
 
 @app.get("/api/v1/users")
-def list_users() -> Dict[str, Any]:
+def list_users(request: Request) -> Dict[str, Any]:
+    if AUTH_MODE == "required":
+        administrator = _session_user(request)
+        if administrator is None or administrator.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="只有管理员可以查看用户列表")
     return {"users": store.list_users()}
 
 
@@ -240,6 +288,56 @@ def create_user(request: UserRequest) -> Dict[str, Any]:
         return store.create_user(request.display_name)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/auth/login")
+def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
+    user = store.authenticate(request.username, request.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token, expires_at = store.create_session(user["user_id"], SESSION_TTL_HOURS)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_HOURS * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("MENET_COOKIE_SECURE", "0") == "1",
+    )
+    return {"user": user, "expires_at": expires_at}
+
+
+@app.post("/api/v1/auth/logout")
+def logout(request: Request, response: Response) -> Dict[str, Any]:
+    store.revoke_session(request.cookies.get(SESSION_COOKIE, ""))
+    response.delete_cookie(SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/v1/auth/me")
+def current_user(request: Request, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    user = _session_user(request)
+    if user is not None:
+        return {**user, "authenticated": True}
+    if AUTH_MODE == "required":
+        raise HTTPException(status_code=401, detail="请先登录")
+    return {**_require_user(user_id), "authenticated": False}
+
+
+@app.post("/api/v1/auth/users", status_code=201)
+def create_account(request_data: AccountCreateRequest, request: Request) -> Dict[str, Any]:
+    administrator = _session_user(request)
+    if administrator is None or administrator.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="只有管理员可以创建用户账号")
+    try:
+        role = request_data.role
+        return store.create_account(request_data.username, request_data.password, request_data.display_name, role)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="用户名已存在") from exc
+        raise
 
 
 @app.post("/api/v1/conversations", status_code=201)
@@ -559,12 +657,19 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     conversation_id = conversation["conversation_id"]
     state = conversation.get("state", {})
-    dataset = _resolve_dataset(request.message, request.user_id, request.dataset_id, state)
+    response_source = {"type": "rules", "label": "规则引擎"}
+    # Parse the natural-language request before resolving entities. The LLM
+    # identifies the user's intent and any dataset/model references; lookup
+    # code only resolves those references against authorized database records.
+    parsed = intent_parser.parse(request.message)
+    response_source = getattr(intent_parser, "last_source", response_source)
+    dataset_reference = parsed.arguments.get("dataset_reference")
+    dataset = _resolve_dataset(request.message, request.user_id, request.dataset_id, state, dataset_reference)
     dataset_dir = (dataset or {}).get("dataset_dir") or request.dataset_dir or state.get("active_dataset_dir") or "data"
     output_base_dir = request.output_dir or state.get("active_output_base_dir") or "runs"
     _validate_paths(dataset_dir, output_base_dir)
     store.add_message(conversation_id, "user", request.message)
-    model_query = any(term in request.message.lower() for term in ("有哪些模型", "模型列表", "可用模型", "对应模型", "对应的模型", "有哪些对应", "模型情况"))
+    model_query = parsed.intent == TaskIntent.LIST_MODELS
     if model_query:
         query_trait = IntentParser._extract_trait(request.message) or (dataset or {}).get("trait")
         target_dataset_id = (dataset or {}).get("dataset_id")
@@ -594,10 +699,9 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
             lines.append("请在右侧训练模型中选择模型后发送预测请求，也可以直接说‘使用模型 model_xxx 预测’。")
             reply = "\n".join(lines)
         store.add_message(conversation_id, "assistant", reply)
-        return {"type": "model_list", "conversation_id": conversation_id, "message": reply, "models": models}
-    parsed = intent_parser.parse(request.message)
-    requested_model_id = request.model_id
-    if not requested_model_id:
+        return {"type": "model_list", "conversation_id": conversation_id, "message": reply, "models": models, "response_source": response_source}
+    requested_model_id = request.model_id or parsed.arguments.get("model_id")
+    if not requested_model_id and intent_parser.last_source.get("type") == "rules":
         model_match = re.search(r"\b(model_[a-z0-9]+)\b", request.message.lower())
         requested_model_id = model_match.group(1) if model_match else None
     requested_model = store.get_model(requested_model_id, request.user_id) if requested_model_id else None
@@ -606,9 +710,14 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         parsed.arguments["trait"] = context_trait
         parsed.missing_fields.remove("trait")
     if parsed.intent is None or parsed.missing_fields:
-        reply = "请补充以下信息：" + "、".join(parsed.missing_fields)
+        reply = (
+            "请补充以下信息：" + "、".join(parsed.missing_fields)
+            if parsed.missing_fields
+            else "当前请求不属于 MENET Agent 已支持的操作。你可以要求检查数据、训练模型、查询可用模型、预测、评估或解释模型。"
+        )
         store.add_message(conversation_id, "assistant", reply)
-        return {"type": "needs_input", "conversation_id": conversation_id, "parsed": parsed.to_dict()}
+        return {"type": "needs_input", "conversation_id": conversation_id, "message": reply,
+                "parsed": parsed.to_dict(), "response_source": response_source}
     source_run = None
     selected_model = None
     if parsed.intent in {TaskIntent.PREDICT_TRAIT, TaskIntent.EVALUATE_MODEL, TaskIntent.EXPLAIN_MODEL}:
@@ -619,11 +728,11 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
             if selected_model["trait"] != parsed.arguments["trait"]:
                 reply = f"所选模型用于 {selected_model['trait']}，不能处理 {parsed.arguments['trait']}。请更换模型或性状。"
                 store.add_message(conversation_id, "assistant", reply)
-                return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict()}
+                return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict(), "response_source": response_source}
             if dataset and selected_model.get("dataset_id") != dataset.get("dataset_id"):
                 reply = "所选模型不属于当前数据集。请切换到模型对应的数据集，或先为当前数据集训练模型。"
                 store.add_message(conversation_id, "assistant", reply)
-                return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict()}
+                return {"type": "needs_model", "conversation_id": conversation_id, "message": reply, "parsed": parsed.to_dict(), "response_source": response_source}
             source_run = store.get(selected_model["task_id"], request.user_id)
             dataset_dir = selected_model["dataset_dir"]
         else:
@@ -638,6 +747,7 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
                 "conversation_id": conversation_id,
                 "message": reply,
                 "parsed": parsed.to_dict(),
+                "response_source": response_source,
             }
     task_arguments = dict(parsed.arguments)
     # For newly uploaded datasets, generate a reproducible random split when
@@ -663,12 +773,28 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
             **({"prediction_genotype_path": request.prediction_genotype_path} if request.prediction_genotype_path else {}),
         },
     }
+    if parsed.intent == TaskIntent.PREDICT_TRAIT and selected_model and not requested_model_id:
+        source_result = (source_run or {}).get("result") or {}
+        metric_steps = [step.get("data", {}) for step in source_result.get("steps", [])]
+        metrics = next((item for item in reversed(metric_steps) if item.get("baselines") or item.get("baseline")), {})
+        baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
+        evidence = {
+            "task_intent": "predict_trait",
+            "trait": parsed.arguments["trait"],
+            "same_test_split": True,
+            "repeated_validation": bool((source_run or {}).get("task", {}).get("metadata", {}).get("repeat_group_id")),
+            "metrics": {"menet": {"test_r2": metrics.get("test_r2")}, **baselines},
+        }
+        evidence["metrics"] = {key: value for key, value in evidence["metrics"].items()
+                                 if isinstance(value, dict) and isinstance(value.get("test_r2"), (int, float))}
+        recommendation = result_interpreter.recommend_prediction_model(evidence)
+        payload["metadata"]["prediction_selection"] = recommendation
     task = MenetTask(**payload)
     _prepare_task_directories(task, output_base_dir)
     errors = task.validate()
     if errors:
         store.add_message(conversation_id, "assistant", "任务参数无效：" + "；".join(errors))
-        return {"type": "invalid_task", "conversation_id": conversation_id, "parsed": parsed.to_dict(), "errors": errors}
+        return {"type": "invalid_task", "conversation_id": conversation_id, "parsed": parsed.to_dict(), "errors": errors, "response_source": response_source}
     store.create(task.to_dict())
     conversation_update = {
         "active_trait": task.trait,
@@ -686,7 +812,7 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         conversation_update["recent_dataset_ids"] = recent[:10]
     store.update_conversation(conversation_id, conversation_update, request.user_id)
     _submit_task(task)
-    return {"type": "task_submitted", "conversation_id": conversation_id, "task_id": task.task_id, "output_dir": task.output_dir, "parsed": parsed.to_dict()}
+    return {"type": "task_submitted", "conversation_id": conversation_id, "task_id": task.task_id, "output_dir": task.output_dir, "parsed": parsed.to_dict(), "response_source": response_source}
 
 
 @app.post("/api/v1/tasks", status_code=202)
@@ -729,6 +855,13 @@ def cancel_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     output = Path(task["task"]["output_dir"])
     output.mkdir(parents=True, exist_ok=True)
     (output / "cancel.requested").write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf":
+        job_id = LSFExecutor(service_root, str(store.path)).job_id(str(output))
+        if job_id:
+            try:
+                LSFExecutor(service_root, str(store.path)).cancel(job_id)
+            except LSFError as exc:
+                raise HTTPException(status_code=502, detail=f"LSF 取消失败: {exc}") from exc
     return {"task_id": task_id, "status": "cancel_requested", "message": "已请求停止；当前轮次结束后生效。"}
 
 
@@ -758,9 +891,10 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
         }
 
     explanation_result = dict(task["result"])
+    explanation_result["task_intent"] = task_data.get("intent")
     if model_selection:
         explanation_result["selected_model"] = model_selection
-    answer = result_interpreter.explain(explanation_result)
+    answer, response_source = result_interpreter.explain_with_source(explanation_result)
     # Keep the baseline comparison visible even when an LLM summary is enabled.
     if task_data.get("intent") in {TaskIntent.TRAIN_MODEL.value, TaskIntent.GENERATE_REPORT.value}:
         metric_steps = [step.get("data", {}) for step in task["result"].get("steps", [])]
@@ -787,15 +921,33 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
                 else:
                     answer += "\n模型建议：当前单次数据划分下各模型差距不大，建议重复验证后再确定默认模型。"
     if model_selection and task_data.get("intent") == TaskIntent.PREDICT_TRAIT.value:
+        prediction_step = next((step.get("data", {}) for step in task["result"].get("steps", [])
+                                if step.get("name") == "predict_trait"), {})
+        prediction_selection = prediction_step.get("prediction_selection") or {}
+        primary_method = prediction_selection.get("primary_method", "menet")
+        method_labels = {"menet": "MENET", "genomic_ridge": "基因组岭回归",
+                         "random_forest": "随机森林", "xgboost": "XGBoost"}
         metrics = model_selection["test_r2"]
         metric_text = f"；训练任务测试集 R² 为 {metrics:.3f}" if isinstance(metrics, (int, float)) else ""
+        selection_text = f"本次以{method_labels.get(primary_method, primary_method)}作为主要预测"
+        if primary_method != "menet":
+            candidates = prediction_selection.get("candidates") or {}
+            primary_r2 = prediction_selection.get("primary_test_r2", candidates.get(primary_method))
+            menet_r2 = prediction_selection.get("menet_test_r2", candidates.get("menet"))
+            if isinstance(primary_r2, (int, float)) and isinstance(menet_r2, (int, float)):
+                selection_text += (
+                    f"（同一测试集 R²={primary_r2:.3f}），并单独输出 MENET 对照（R²={menet_r2:.3f}）；"
+                    "两者未进行平均或加权"
+                )
+            else:
+                selection_text += "，并单独输出 MENET 对照；两者未进行平均或加权"
         answer = (
-            f"本次预测使用模型“{model_selection['model_name']}”"
+            f"{selection_text}。预测基于训练资产“{model_selection['model_name']}”"
             f"（模型 ID：{model_selection['model_id']}，训练任务：{model_selection['training_task_id']}，"
             f"{'自动选择' if model_selection['selection'] == 'automatic' else '手动选择'}"
             f"{metric_text}）。{answer}"
         )
-    return {"task_id": task_id, "answer": answer, "model_selection": model_selection}
+    return {"task_id": task_id, "answer": answer, "model_selection": model_selection, "response_source": response_source}
 
 
 @app.get("/api/v1/tasks/{task_id}/artifacts/{filename}")
@@ -826,7 +978,16 @@ def list_artifacts(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, An
 
 
 def _submit_task(task: MenetTask) -> None:
-    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "celery":
+    backend = os.environ.get("MENET_QUEUE_BACKEND", "thread").lower()
+    if backend == "lsf":
+        try:
+            job_id = LSFExecutor(service_root, str(store.path)).submit(task.to_dict())
+            (Path(task.output_dir) / ".lsf_job_id").write_text(job_id, encoding="utf-8")
+            return
+        except Exception as exc:
+            store.update(task.task_id, "failed", {"task_id": task.task_id, "status": "failed", "errors": [f"LSF任务提交失败: {exc}"]})
+            return
+    if backend == "celery":
         try:
             from .celery_app import run_task as celery_task
             celery_task.delay(task.to_dict())
@@ -872,6 +1033,20 @@ def _require_user(user_id: str) -> Dict[str, Any]:
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     return user
+
+
+def _session_user(request: Request) -> Optional[Dict[str, Any]]:
+    token = request.cookies.get(SESSION_COOKIE)
+    return store.get_session_user(token) if token else None
+
+
+def _effective_user_id(request: Request, requested_user_id: Optional[str] = None) -> str:
+    user = _session_user(request)
+    if user is not None:
+        return user["user_id"]
+    if AUTH_MODE == "required":
+        raise HTTPException(status_code=401, detail="请先登录")
+    return requested_user_id or DEFAULT_USER_ID
 
 
 def _latest_compatible_run(user_id: str, dataset_dir: str, trait: str) -> Optional[Dict[str, Any]]:
@@ -923,6 +1098,12 @@ def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:
         "execution_seconds": execution_seconds,
         "terminal": terminal,
     }
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf":
+        lsf = LSFExecutor(service_root, str(store.path))
+        job_id = lsf.job_id(task.get("output_dir", ""))
+        if job_id:
+            runtime["lsf_job_id"] = job_id
+            runtime["lsf_status"] = lsf.status(job_id)
     progress_path = Path(task.get("output_dir", "")) / "progress.json"
     if progress_path.is_file():
         try:
@@ -1002,11 +1183,19 @@ def _local_benchmark(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], state: Dict[str, Any], dataset_reference: Optional[str] = None) -> Optional[Dict[str, Any]]:
     datasets = store.list_datasets(user_id)
     by_id = {item["dataset_id"]: item for item in datasets}
     text = message.lower()
     recent = state.get("recent_dataset_ids", [])
+    # This is entity resolution, not intent recognition. Prefer the entity
+    # extracted by the LLM; exact matching below is only a deterministic
+    # fallback when the model service is unavailable or omitted the reference.
+    reference = (dataset_reference or "").strip().lower()
+    if reference:
+        for item in datasets:
+            if item.get("dataset_id", "").lower() == reference or item.get("name", "").lower() == reference:
+                return item
     if any(word in text for word in ("上一个数据", "前一个数据", "之前的数据")) and len(recent) > 1:
         return by_id.get(recent[1])
     # A dataset explicitly named in the message or a relative-history request

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 
 class TaskIntent(str, Enum):
+    LIST_MODELS = "list_models"
     INSPECT_DATA = "inspect_data"
     TRAIN_MODEL = "train_model"
     PREDICT_TRAIT = "predict_trait"

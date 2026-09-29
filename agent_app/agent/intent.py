@@ -35,7 +35,11 @@ class IntentParser:
         if not text:
             return ParsedIntent(None, {}, ["message"], 0.0)
 
-        if any(word in text for word in ("检查", "校验", "能不能用", "数据质量")):
+        if any(word in text for word in ("有几个模型", "有哪些模型", "模型列表", "可用模型", "对应模型", "哪些模型", "模型情况")) or (
+            "模型" in text and any(word in text for word in ("用于预测", "供预测", "可以预测", "能够预测", "拿来预测"))
+        ):
+            intent = TaskIntent.LIST_MODELS
+        elif any(word in text for word in ("检查", "校验", "能不能用", "数据质量")):
             intent = TaskIntent.INSPECT_DATA
         elif any(word in text for word in ("训练", "train")):
             # Training is the primary workflow when the request also asks for

@@ -47,7 +47,7 @@ Work on generic Windows installers, arbitrary-computer compatibility, production
 
 ```bash
 cd /home/mingmi/workspace/MenetAgent
-./agent_app/scripts/start_agent.sh
+MENET_PYTHON=/home/mingmi/workspace/MenetAgent/.venv/bin/python ./agent_app/scripts/start_agent.sh
 ```
 
 Open:
@@ -55,7 +55,7 @@ Open:
 - Web application: http://127.0.0.1:8010/app/
 - OpenAPI documentation: http://127.0.0.1:8010/docs
 
-The launcher runs from `agent_app/`, adds `MENET/` as the explicit algorithm dependency, and stores local state under `agent_app/runs/` and `agent_app/uploads/`.
+The launcher script is under `agent_app/scripts/`, adds `MENET/` as the explicit algorithm dependency, and stores local state under `agent_app/runs/` and `agent_app/uploads/`.
 
 ## Run Tests
 

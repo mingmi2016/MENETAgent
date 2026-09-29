@@ -5,6 +5,8 @@ __pycache__/
 *.log
 agent_app/runs/
 agent_app/uploads/
+agent_app/.env
+agent_app/data/agent.db*
 
 # Generated training artifacts
 MENET/save/*.pt

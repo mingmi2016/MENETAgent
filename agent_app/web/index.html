@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MENET Agent</title>
-  <link rel="stylesheet" href="/app/style.css?v=20260908-5">
+  <link rel="stylesheet" href="/app/style.css?v=20260926-1">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">M</span><div><strong>MENET Agent</strong><small>多环境农艺性状预测 · Mixed-effects deep neural network</small></div></div>
     <div class="top-actions">
-      <div class="user-switch"><select id="user-select" aria-label="当前研究档案"></select><button id="add-user" title="新增研究档案" aria-label="新增研究档案">+</button></div>
+      <div class="auth-area"><span id="auth-user" class="auth-user hidden"></span><button id="auth-login" type="button">登录</button><button id="auth-logout" class="hidden" type="button">退出</button></div>
+      <button id="manage-users" class="hidden" type="button">用户管理</button>
       <button id="llm-status" class="llm-status" type="button" title="查看 AI 模型设置"><span class="dot"></span><span>规则模式</span></button>
       <a href="/docs" target="_blank">API 文档</a>
       <div id="health" class="status-pill"><span class="dot"></span> checking service</div>
@@ -97,6 +98,8 @@
     </section>
   </main>
   <dialog id="task-confirm" class="confirm-dialog"><h3>确认开始长任务</h3><p id="confirm-summary"></p><p class="field-help">任务会在后台执行，可以离开页面后再从历史会话中查看。</p><div class="dialog-actions"><button id="cancel-run" class="button secondary" type="button">返回修改</button><button id="confirm-run" class="button primary" type="button">开始运行</button></div></dialog>
-  <script src="/app/app.js?v=20260909-9"></script>
+  <dialog id="auth-dialog" class="auth-dialog"><form id="auth-form" method="dialog"><div class="auth-dialog-heading"><div><p class="kicker">ACCOUNT</p><h2 id="auth-title">登录 MENET Agent</h2></div><button id="auth-close" class="icon-button" type="button" aria-label="关闭">×</button></div><label>用户名<input id="auth-username" name="username" autocomplete="username" required></label><label>密码<input id="auth-password" name="password" type="password" minlength="8" autocomplete="current-password" required></label><p class="field-help">账号由管理员创建，请使用管理员分配的用户名和密码。</p><p id="auth-error" class="inline-result error hidden"></p><div class="auth-dialog-actions"><span></span><button class="primary-button" type="submit">登录</button></div></form></dialog>
+  <dialog id="user-dialog" class="user-dialog"><div class="auth-dialog-heading"><div><p class="kicker">ADMINISTRATION</p><h2>用户管理</h2></div><button id="user-dialog-close" class="icon-button" type="button" aria-label="关闭">×</button></div><div id="user-list" class="user-list"></div><form id="user-form" class="user-form"><h3>新增用户</h3><div class="user-form-grid"><label>用户名<input id="new-username" required autocomplete="off"></label><label>显示名称<input id="new-display-name" required></label><label>初始密码<input id="new-password" type="password" minlength="8" required autocomplete="new-password"></label><label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label></div><p id="user-form-error" class="inline-result error hidden"></p><div class="dialog-actions"><button class="primary-button" type="submit">创建用户</button></div></form></dialog>
+  <script src="/app/app.js?v=20260926-2"></script>
 </body>
 </html>

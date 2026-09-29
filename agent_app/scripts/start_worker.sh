@@ -3,17 +3,21 @@ set -euo pipefail
 
 APP_ROOT="$(dirname "$(dirname "$(realpath "$0")")")"
 PROJECT_ROOT="$(dirname "$APP_ROOT")"
-VENV="$PROJECT_ROOT/.venv"
+REPO_ROOT="$PROJECT_ROOT"
+if [[ ! -x "$REPO_ROOT/.venv/bin/python" && -x "$(dirname "$PROJECT_ROOT")/.venv/bin/python" ]]; then
+  REPO_ROOT="$(dirname "$PROJECT_ROOT")"
+fi
+PYTHON_BIN="${MENET_PYTHON:-$REPO_ROOT/.venv/bin/python}"
 
-if [[ ! -x "$VENV/bin/python" ]]; then
-  echo "Missing $VENV. Install agent_app/requirements.txt first." >&2
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing Python executable: $PYTHON_BIN" >&2
   exit 1
 fi
 
 cd "$APP_ROOT"
-export MENET_CORE_ROOT="${MENET_CORE_ROOT:-$PROJECT_ROOT/MENET}"
+export MENET_CORE_ROOT="${MENET_CORE_ROOT:-$REPO_ROOT/MENET}"
 export PYTHONPATH="$APP_ROOT:$MENET_CORE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-exec "$VENV/bin/python" -m celery -A agent.celery_app.celery worker \
+exec "$PYTHON_BIN" -m celery -A agent.celery_app.celery worker \
   --loglevel "${MENET_WORKER_LOGLEVEL:-INFO}" \
   --pool "${MENET_WORKER_POOL:-solo}"

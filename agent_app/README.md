@@ -19,21 +19,25 @@ The application depends on the sibling `../MENET` algorithm directory. The start
 ## Local Service
 
 ```bash
-cd /home/mingmi/workspace/MenetAgent
-./agent_app/scripts/start_agent.sh
+cd /home/mingmi/workspace/MenetAgent/agent_app
+MENET_PYTHON=/home/mingmi/workspace/MenetAgent/.venv/bin/python ./scripts/start_agent.sh
 ```
 
 The default address is `http://127.0.0.1:8010`. Override it with `MENET_AGENT_HOST` and `MENET_AGENT_PORT`.
 
 The current 8010 service provides the REST/Web Agent interfaces. A local `stdio` MCP server is available now. It needs no login or Bearer Token because Codex starts it as a local child process. Streamable HTTP is deferred; a future remote endpoint must validate a Bearer token or OAuth identity rather than relying on the client setting alone.
 
+## User accounts for shared deployment
+
+The Web/API service stores users and hashed passwords, sessions, conversations, tasks, datasets and model metadata in SQLite. Passwords are never stored in plain text. The current deployment uses `MENET_AUTH_MODE=required`, so every non-auth API request requires a login session. The same code and database are used locally and on the cluster; only the deployment `.env` changes when a different policy is needed. The Web UI provides login and logout, while account creation is administrator-only. Create the first administrator from the application directory with `PYTHONPATH=. python scripts/create_user.py admin 管理员 --role admin`; the command prompts for the password. The authentication endpoints are `POST /api/v1/auth/login`, `GET /api/v1/auth/me` and `POST /api/v1/auth/logout`.
+
 ## Local MCP
 
 Start it manually for a protocol check:
 
 ```bash
-cd /home/mingmi/workspace/MenetAgent
-./agent_app/scripts/start_mcp.sh
+cd /home/mingmi/workspace/MenetAgent/agent_app
+./scripts/start_mcp.sh
 ```
 
 For Codex, create a local STDIO MCP entry with command `/home/mingmi/workspace/MenetAgent/agent_app/scripts/start_mcp.sh`; do not configure a URL or Bearer token. The server exposes dataset inspection, asynchronous training, new-genotype prediction, evaluation, explanation, task polling, cancellation and temporary-task cleanup.
@@ -43,9 +47,9 @@ MCP state is held in memory for the lifetime of the local process. No user accou
 For Redis/Celery execution:
 
 ```bash
-cd /home/mingmi/workspace/MenetAgent
-MENET_QUEUE_BACKEND=celery ./agent_app/scripts/start_worker.sh
-MENET_QUEUE_BACKEND=celery ./agent_app/scripts/start_agent.sh
+cd /home/mingmi/workspace/MenetAgent/agent_app
+MENET_QUEUE_BACKEND=celery ./scripts/start_worker.sh
+MENET_QUEUE_BACKEND=celery ./scripts/start_agent.sh
 ```
 
 ## Responsibilities
@@ -71,7 +75,7 @@ The Web UI contains an **AI Model** settings panel. It can discover models, pers
 
 For a third-party relay, enter either the service root or its `/v1` URL; the client normalizes the model-list, Anthropic Messages, and OpenAI Chat Completions paths. Auto mode selects Anthropic `/v1/messages` for Claude models and OpenAI `/v1/chat/completions` for other models. Keep the real key in the ignored local settings file or `MENET_LLM_API_KEY`; never add it to this repository. A visible model name does not guarantee an active upstream channel, so always run the connection test before enabling a model for users.
 
-Without an enabled or reachable LLM, the service uses the deterministic rule parser. The LLM may extract intent and explain results, but workflow validation and execution remain controlled by application code.
+Without an enabled or reachable LLM, the service uses the deterministic rule parser. The LLM is intended to participate in intent parsing, data-check explanation and result interpretation through task-specific harnesses; the harness supplies structured evidence, constrains the JSON output and rejects unsupported claims. Workflow validation and execution remain controlled by application code, and every displayed response identifies whether it came from the configured model service or a rule-based fallback.
 
 ## Model assets
 
@@ -84,3 +88,44 @@ Every completed workflow writes `quality_report.json`. Deterministic checks curr
 The **重复验证** action submits 2–5 independent runs with different split and training seeds. Runs reuse the selected model's trait, dataset, epoch count and split ratios, and each seed is recorded in `task.json`. The default single GPU worker executes them sequentially to avoid concurrent GPU memory exhaustion.
 
 The current development target is this WSL workstation. Generic installers, server multi-tenancy and a C++ wrapper are deferred until the local Agent and MCP workflows are complete.
+
+## Deployment on the LSF cluster
+
+On the cluster, the login node provides the Web/API/MCP service. MENET training is submitted by LSF and runs on `gpu01`; the login node does not run GPU training.
+
+Create `agent_app/.env` from `.env.example` and choose the queue backend with `MENET_QUEUE_BACKEND`:
+
+```bash
+# thread (default), celery, or lsf
+MENET_QUEUE_BACKEND=lsf
+
+MENET_AGENT_ROOT=/data/user_home/xtcgroup/huawei/MenetAgent/agent_app
+MENET_AGENT_DB=runs/agent.db
+MENET_CORE_ROOT=/data/user_home/xtcgroup/huawei/MenetAgent/MENET
+
+# Python used by the login-node Web/API service
+MENET_PYTHON=/data/user_home/xtcgroup/huawei/envs/menet-web/bin/python
+
+# Python used inside the LSF GPU allocation
+MENET_LSF_PYTHON=/data/user_home/xtcgroup/huawei/envs/torch_gpu/bin/python
+MENET_LSF_QUEUE=gpu
+MENET_LSF_HOST=gpu01
+MENET_LSF_WALLTIME=24:00
+```
+
+The backend settings are backward-compatible:
+
+- `MENET_QUEUE_BACKEND=thread` keeps the original in-process thread executor.
+- `MENET_QUEUE_BACKEND=celery` keeps the existing Redis/Celery path.
+- `MENET_QUEUE_BACKEND=lsf` submits `bsub -q gpu -m gpu01 -gpu "num=1"` jobs and uses `bjobs`/`bkill` for status and cancellation.
+
+The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time; it does not select LSF merely because `bsub` is installed, or select Celery merely because Redis is reachable. Therefore the local WSL deployment and the cluster deployment use the same code with different `.env` files. `device=auto` is a separate setting and is resolved by PyTorch inside the actual execution process, so it can use the local WSL GPU for `thread` tasks or the allocated cluster GPU for LSF tasks.
+
+Start the Web service from the login node:
+
+```bash
+cd /data/user_home/xtcgroup/huawei/MenetAgent/agent_app
+bash scripts/start_agent.sh
+```
+
+`start_agent.sh` loads `agent_app/.env` when it exists. The Web/API process uses `menet-web`; submitted GPU workers use `torch_gpu`. Do not create a `.venv` on the server for this deployment. The local workstation may continue to use its own `.venv`.
