@@ -120,7 +120,6 @@ The backend settings are backward-compatible:
 - `MENET_QUEUE_BACKEND=lsf` submits `bsub -q gpu -m gpu01 -gpu "num=1"` jobs and uses `bjobs`/`bkill` for status and cancellation.
 
 The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time; it does not select LSF merely because `bsub` is installed, or select Celery merely because Redis is reachable. Therefore the local WSL deployment and the cluster deployment use the same code with different `.env` files. `device=auto` is a separate setting and is resolved by PyTorch inside the actual execution process, so it can use the local WSL GPU for `thread` tasks or the allocated cluster GPU for LSF tasks.
-
 Start the Web service from the login node:
 
 ```bash
