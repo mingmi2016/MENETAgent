@@ -288,6 +288,10 @@ class MenetTools:
             genotype_path = Path(prediction_path) if prediction_path else Path(task.dataset_dir) / "genotype" / "genotype.csv"
             genotype = pd.read_csv(genotype_path, index_col=0, comment="*")
             training_genotype = pd.read_csv(Path(task.dataset_dir) / "genotype" / "genotype.csv", index_col=0, comment="*")
+            # Normalize sample IDs because CSV parsing may infer numeric IDs while
+            # the persisted relatedness matrix stores the same IDs as strings.
+            genotype.index = genotype.index.astype(str)
+            training_genotype.index = training_genotype.index.astype(str)
             if list(genotype.columns) != list(training_genotype.columns):
                 return self._result(False, "failed", ["新基因型文件的 SNP 名称或顺序与训练数据不一致"], [])
             if genotype.index.has_duplicates:
@@ -298,6 +302,8 @@ class MenetTools:
             relatedness = torch.load(relatedness_path, map_location=config["device"], weights_only=False)
             if not isinstance(relatedness, pd.DataFrame):
                 relatedness = pd.DataFrame(relatedness)
+            relatedness.index = relatedness.index.astype(str)
+            relatedness.columns = relatedness.columns.astype(str)
             if prediction_path:
                 from network.contrastive_learning import TraitSpecificEncoderForRepGeno
                 encoder_config = self._load_config("configs/contrastive_learning.json", task)

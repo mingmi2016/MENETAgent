@@ -222,8 +222,8 @@ def update_llm_settings(request_data: LLMSettingsRequest) -> Dict[str, Any]:
     api_key = request_data.api_key
     if api_key is None:
         api_key = llm_settings.get("api_key", "")
-    intent_model = request_data.intent_model.strip() or request_data.model.strip()
-    analysis_model = request_data.analysis_model.strip() or intent_model
+    intent_model = request_data.intent_model.strip() or request_data.model.strip() or llm_settings.get("intent_model") or llm_settings.get("model", "")
+    analysis_model = request_data.analysis_model.strip() or intent_model or llm_settings.get("analysis_model") or llm_settings.get("model", "")
     llm_settings = {
         "enabled": request_data.enabled,
         "provider": provider,
@@ -664,7 +664,7 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
     parsed = intent_parser.parse(request.message)
     response_source = getattr(intent_parser, "last_source", response_source)
     dataset_reference = parsed.arguments.get("dataset_reference")
-    dataset = _resolve_dataset(request.message, request.user_id, request.dataset_id, state, dataset_reference)
+    dataset = _resolve_dataset(request.message, request.user_id, request.dataset_id, state, dataset_reference, parsed.arguments.get("trait"))
     dataset_dir = (dataset or {}).get("dataset_dir") or request.dataset_dir or state.get("active_dataset_dir") or "data"
     output_base_dir = request.output_dir or state.get("active_output_base_dir") or "runs"
     _validate_paths(dataset_dir, output_base_dir)
@@ -1183,7 +1183,7 @@ def _local_benchmark(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], state: Dict[str, Any], dataset_reference: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], state: Dict[str, Any], dataset_reference: Optional[str] = None, trait: Optional[str] = None) -> Optional[Dict[str, Any]]:
     datasets = store.list_datasets(user_id)
     by_id = {item["dataset_id"]: item for item in datasets}
     text = message.lower()
@@ -1198,6 +1198,20 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
                 return item
     if any(word in text for word in ("上一个数据", "前一个数据", "之前的数据")) and len(recent) > 1:
         return by_id.get(recent[1])
+    # An explicit trait is stronger than the currently selected dataset.
+    explicit_trait = (trait or IntentParser._extract_trait(message) or "").strip().lower()
+    if explicit_trait:
+        trait_matches = [
+            item for item in datasets
+            if item.get("trait", "").strip().lower() == explicit_trait
+        ]
+        if len(trait_matches) == 1:
+            return trait_matches[0]
+        if len(trait_matches) > 1:
+            active = by_id.get(state.get("active_dataset_id"))
+            if active in trait_matches:
+                return active
+            return trait_matches[0]
     # A dataset explicitly named in the message or a relative-history request
     # takes precedence over the UI selection.
     for item in datasets:

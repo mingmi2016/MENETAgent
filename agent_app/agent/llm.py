@@ -11,7 +11,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib import request
+from urllib import error, request
 
 from .intent import IntentParser, ParsedIntent
 from .models import TaskIntent
@@ -82,7 +82,7 @@ class CompatibleLLMClient:
             return self.provider
         return "anthropic_compatible" if self.model.lower().startswith("claude") else "openai_compatible"
 
-    def complete_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def complete_json(self, system_prompt: str, user_prompt: str, max_tokens: int = 1024) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("LLM 未配置")
         if self.protocol_provider == "ollama":
@@ -93,7 +93,7 @@ class CompatibleLLMClient:
             "model": self.model,
             "temperature": 0,
             "stream": False,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -105,8 +105,7 @@ class CompatibleLLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         endpoint = self._versioned_endpoint("chat/completions")
         req = request.Request(endpoint, data=body, headers=headers, method="POST")
-        with request.urlopen(req, timeout=self.timeout) as response:
-            result = self._read_json_response(response)
+        result = self._request_json(req, self.timeout)
         content = result["choices"][0]["message"]["content"]
         return self._parse_json(content)
 
@@ -132,8 +131,7 @@ class CompatibleLLMClient:
             headers=headers,
             method="POST",
         )
-        with request.urlopen(req, timeout=self.timeout) as response:
-            result = self._read_json_response(response)
+        result = self._request_json(req, self.timeout)
         content = "".join(
             block.get("text", "")
             for block in result.get("content", [])
@@ -178,8 +176,7 @@ class CompatibleLLMClient:
             if self.protocol_provider == "anthropic_compatible" or self.provider == "compatible_auto":
                 headers["x-api-key"] = self.api_key
                 headers["anthropic-version"] = "2023-06-01"
-        with request.urlopen(request.Request(endpoint, headers=headers), timeout=min(self.timeout, 10)) as response:
-            result = self._read_json_response(response)
+        result = self._request_json(request.Request(endpoint, headers=headers), min(self.timeout, 10))
         return [item["id"] for item in result.get("data", []) if item.get("id")]
 
     def _versioned_endpoint(self, resource: str) -> str:
@@ -190,6 +187,21 @@ class CompatibleLLMClient:
             return f"{base}/{resource}"
         return f"{base}/v1/{resource}"
 
+    @classmethod
+    def _request_json(cls, req, timeout: int) -> Dict[str, Any]:
+        try:
+            with request.urlopen(req, timeout=min(timeout, 15)) as response:
+                return cls._read_json_response(response)
+        except (error.URLError, TimeoutError):
+            # Some HTTPS relays close urllib TLS sessions unexpectedly; httpx
+            # provides a more compatible retry without changing the API contract.
+            import httpx
+            response = httpx.request(
+                req.get_method(), req.full_url, headers=dict(req.header_items()),
+                content=req.data, timeout=min(timeout, 15)
+            )
+            response.raise_for_status()
+            return response.json()
     @staticmethod
     def _read_json_response(response) -> Dict[str, Any]:
         body = response.read()
@@ -203,7 +215,7 @@ class CompatibleLLMClient:
         started = time.monotonic()
         result = self.complete_json(
             'Return JSON only in this exact shape: {"ok": true}.',
-            "Check the connection.",
+            "Check the connection.", max_tokens=16,
         )
         return {"ok": result.get("ok") is True, "latency_seconds": round(time.monotonic() - started, 2)}
 

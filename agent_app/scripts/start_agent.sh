@@ -14,6 +14,9 @@ if [[ -f "$APP_ROOT/.env" ]]; then
   source "$APP_ROOT/.env"
   set +a
 fi
+# Keep proxy variable casing consistent when a non-interactive shell reloads ~/.bashrc.
+if [[ -n "${HTTPS_PROXY:-}" ]]; then export https_proxy="$HTTPS_PROXY"; fi
+if [[ -n "${HTTP_PROXY:-}" ]]; then export http_proxy="$HTTP_PROXY"; fi
 PYTHON_BIN="${MENET_PYTHON:-$REPO_ROOT/.venv/bin/python}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then

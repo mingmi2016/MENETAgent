@@ -536,6 +536,29 @@ def test_dataset_resolution_prefers_named_environment_over_species_fallback(tmp_
     assert selected["dataset_id"] == "wheat_env1"
 
 
+def test_dataset_resolution_prefers_explicit_trait_over_active_dataset(tmp_path, monkeypatch):
+    import agent.api as api
+
+    store = TaskStore(str(tmp_path / "agent.db"))
+    user = store.create_user("Researcher")
+    flowering = dataset_record("rice_flowering", user["user_id"], "水稻开花期示例", "rice", tmp_path)
+    flowering["trait"] = "flowering_arkansas"
+    height = dataset_record("rice_height", user["user_id"], "水稻株高示例", "rice", tmp_path)
+    height["trait"] = "plant_height"
+    store.create_dataset(flowering)
+    store.create_dataset(height)
+    monkeypatch.setattr(api, "store", store)
+
+    selected = _resolve_dataset(
+        "请检查数据，性状为 plant_height",
+        user["user_id"],
+        "rice_flowering",
+        {"active_dataset_id": "rice_flowering"},
+        trait="plant_height",
+    )
+    assert selected["dataset_id"] == "rice_height"
+
+
 def test_task_lookup_is_scoped_to_owner(tmp_path):
     store = TaskStore(str(tmp_path / "agent.db"))
     alice = store.create_user("Alice")
