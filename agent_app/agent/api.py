@@ -34,6 +34,12 @@ from .quality import build_quality_report
 from .tools import MenetTools
 
 
+LSF_TASK_INTENTS = {
+    TaskIntent.TRAIN_MODEL,
+}
+LSF_TERMINAL_STATUSES = {"DONE", "EXIT", "ZOMBI"}
+
+
 class TaskRequest(BaseModel):
     trait: str = Field(min_length=1)
     user_id: str = DEFAULT_USER_ID
@@ -856,10 +862,16 @@ def cancel_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     (output / "cancel.requested").write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
     if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf":
-        job_id = LSFExecutor(service_root, str(store.path)).job_id(str(output))
+        lsf = LSFExecutor(service_root, str(store.path))
+        job_id = lsf.job_id(str(output))
         if job_id:
+            status = lsf.status(job_id)
+            if status in LSF_TERMINAL_STATUSES:
+                refreshed = _sync_lsf_terminal_state(task, status) or task
+                if refreshed["status"] in {"completed", "failed", "cancelled"}:
+                    raise HTTPException(status_code=409, detail="任务已经结束，无法取消")
             try:
-                LSFExecutor(service_root, str(store.path)).cancel(job_id)
+                lsf.cancel(job_id)
             except LSFError as exc:
                 raise HTTPException(status_code=502, detail=f"LSF 取消失败: {exc}") from exc
     return {"task_id": task_id, "status": "cancel_requested", "message": "已请求停止；当前轮次结束后生效。"}
@@ -896,7 +908,7 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
         explanation_result["selected_model"] = model_selection
     answer, response_source = result_interpreter.explain_with_source(explanation_result)
     # Keep the baseline comparison visible even when an LLM summary is enabled.
-    if task_data.get("intent") in {TaskIntent.TRAIN_MODEL.value, TaskIntent.GENERATE_REPORT.value}:
+    if task_data.get("intent") in {TaskIntent.TRAIN_MODEL.value}:
         metric_steps = [step.get("data", {}) for step in task["result"].get("steps", [])]
         metrics = next((item for item in reversed(metric_steps) if item.get("baselines") or item.get("baseline")), {})
         baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
@@ -977,9 +989,13 @@ def list_artifacts(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, An
     return {"task_id": task_id, "files": files}
 
 
+def _uses_lsf_backend(task: MenetTask) -> bool:
+    return task.intent in LSF_TASK_INTENTS
+
+
 def _submit_task(task: MenetTask) -> None:
     backend = os.environ.get("MENET_QUEUE_BACKEND", "thread").lower()
-    if backend == "lsf":
+    if backend == "lsf" and _uses_lsf_backend(task):
         try:
             job_id = LSFExecutor(service_root, str(store.path)).submit(task.to_dict())
             (Path(task.output_dir) / ".lsf_job_id").write_text(job_id, encoding="utf-8")
@@ -1055,7 +1071,7 @@ def _latest_compatible_run(user_id: str, dataset_dir: str, trait: str) -> Option
         task = record["task"]
         if record["status"] != "completed" or task.get("trait") != trait:
             continue
-        if task.get("intent") not in {"train_model", "generate_report"}:
+        if task.get("intent") not in {"train_model"}:
             continue
         if Path(task.get("dataset_dir", "")).resolve() != target:
             continue
@@ -1065,8 +1081,66 @@ def _latest_compatible_run(user_id: str, dataset_dir: str, trait: str) -> Option
     return None
 
 
+
+
+def _load_lsf_result(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[str, Any]]:
+    output_dir = Path(record["task"].get("output_dir", ""))
+    result_path = output_dir / "result.json"
+    if result_path.is_file():
+        try:
+            return json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            pass
+    if lsf_status == "DONE":
+        result: Dict[str, Any] = {
+            "task_id": record["task_id"],
+            "status": "completed",
+            "steps": [],
+            "errors": [],
+            "warnings": [],
+        }
+        quality_path = output_dir / "quality_report.json"
+        if quality_path.is_file():
+            try:
+                quality = json.loads(quality_path.read_text(encoding="utf-8"))
+                result["quality_report"] = quality
+                result["warnings"] = [
+                    check.get("detail", check.get("title", ""))
+                    for check in quality.get("checks", [])
+                    if check.get("level") == "warning"
+                ]
+            except (OSError, ValueError, TypeError):
+                pass
+        return result
+    if lsf_status in {"EXIT", "ZOMBI"}:
+        return {
+            "task_id": record["task_id"],
+            "status": "failed",
+            "errors": ["LSF 作业已结束但未写入结果，请查看 lsf.stderr。"],
+            "warnings": [],
+        }
+    return None
+
+
+def _sync_lsf_terminal_state(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[str, Any]]:
+    if record["status"] in {"completed", "failed", "cancelled"}:
+        return record
+    result = _load_lsf_result(record, lsf_status)
+    if result is None:
+        return None
+    store.update(record["task_id"], result.get("status", "completed"), result)
+    return store.get(record["task_id"], record["user_id"])
+
+
 def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:
     """Add honest elapsed time and a locally learned duration estimate."""
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() == "lsf" and record["status"] not in {"completed", "failed", "cancelled"}:
+        lsf = LSFExecutor(service_root, str(store.path))
+        job_id = lsf.job_id(record["task"].get("output_dir", ""))
+        if job_id:
+            lsf_status = lsf.status(job_id)
+            if lsf_status in LSF_TERMINAL_STATUSES:
+                record = _sync_lsf_terminal_state(record, lsf_status) or record
     terminal = record["status"] in {"completed", "failed", "cancelled"}
     created = datetime.fromisoformat(record["created_at"])
     started = datetime.fromisoformat(record["started_at"]) if record.get("started_at") else None
@@ -1130,7 +1204,7 @@ def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:
             "history_samples": 1,
             "message": "预计区间来自本机 RTX 5060 对该示例数据和配置的实测基准，不含排队时间。",
         })
-    elif task.get("intent") in {"train_model", "generate_report"}:
+    elif task.get("intent") in {"train_model"}:
         runtime.update({
             "estimate_source": "pending_benchmark",
             "history_samples": 0,

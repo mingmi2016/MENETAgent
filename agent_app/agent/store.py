@@ -360,7 +360,7 @@ class TaskStore:
         for user in self.list_users():
             for record in self.list_tasks(user["user_id"], limit=1000):
                 task = record["task"]
-                if record["status"] != "completed" or task.get("intent") not in {"train_model", "generate_report"}:
+                if record["status"] != "completed" or task.get("intent") not in {"train_model"}:
                     continue
                 if not (Path(task.get("output_dir", "")) / "menet_model.pt").is_file():
                     continue

@@ -37,14 +37,24 @@ def run_task(task_data: Dict[str, Any], database_path: str) -> Dict[str, Any]:
         validation = next((step.get("data", {}) for step in result.get("steps", []) if step.get("name") == "validate_dataset"), {})
         if validation.get("matched_sample_count") is not None and validation.get("snp_count") is not None:
             store.update_dataset_stats(task.dataset_dir, validation["matched_sample_count"], validation["snp_count"])
-        if result.get("status") == "completed" and task.intent.value in {"train_model", "generate_report"}:
+        if result.get("status") == "completed" and task.intent.value in {"train_model"}:
             try:
                 result["model"] = store.register_model(task.to_dict(), result)
             except ValueError as exc:
                 result.setdefault("warnings", []).append(f"模型登记失败：{exc}")
+        (output_dir / "result.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         store.update(task.task_id, result["status"], result)
         return result
     except Exception as exc:
         result = {"task_id": task.task_id, "status": "failed", "errors": [str(exc)]}
+        try:
+            Path(task.output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(task.output_dir) / "result.json").write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
         store.update(task.task_id, "failed", result)
         return result

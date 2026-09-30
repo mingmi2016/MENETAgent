@@ -51,8 +51,6 @@ class IntentParser:
             intent = TaskIntent.EXPLAIN_MODEL
         elif any(word in text for word in ("评估", "效果", "r2", "r²")):
             intent = TaskIntent.EVALUATE_MODEL
-        elif any(word in text for word in ("报告", "report")):
-            intent = TaskIntent.GENERATE_REPORT
         elif any(word in text for word in ("训练", "train", "分析", "menet")):
             intent = TaskIntent.TRAIN_MODEL
         else:

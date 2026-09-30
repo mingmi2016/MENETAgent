@@ -458,34 +458,6 @@ class MenetTools:
         except Exception as exc:
             return self._result(False, "failed", [f"读取模型解释结果失败: {exc}"], [])
 
-    def generate_report(self, task: MenetTask) -> Dict[str, Any]:
-        output_dir = Path(task.output_dir)
-        metrics_path = output_dir / "metrics.json"
-        if not metrics_path.is_file():
-            return self._result(False, "failed", [f"找不到模型指标: {metrics_path}"], [])
-        try:
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            history_path = output_dir / "training_history.json"
-            history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
-            rows = "".join(
-                f"<tr><td>{item.get('epoch')}</td><td>{item.get('train_loss', ''):.6f}</td>"
-                f"<td>{item.get('val_loss', ''):.6f}</td><td>{item.get('val_r2', ''):.6f}</td></tr>"
-                for item in history
-            )
-            html = f"""<!doctype html>
-<html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>MENET Report</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;line-height:1.5}}table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.4rem .7rem}}</style>
-</head><body><h1>MENET 分析报告</h1><p>目标性状：{task.trait}</p>
-<h2>测试集指标</h2><ul><li>Test loss: {metrics.get('test_loss')}</li><li>Test R2: {metrics.get('test_r2')}</li><li>Device: {metrics.get('device')}</li></ul>
-<h2>训练历史</h2><table><thead><tr><th>Epoch</th><th>Train loss</th><th>Validation loss</th><th>Validation R2</th></tr></thead><tbody>{rows}</tbody></table>
-<h2>结果说明</h2><p>模型重要性结果用于解释当前模型，不等同于传统 GWAS 的统计显著性或生物学因果结论。</p>
-</body></html>"""
-            report_path = output_dir / "report.html"
-            report_path.write_text(html, encoding="utf-8")
-            return self._result(True, "completed", [], [], {"artifacts": [str(report_path)]})
-        except Exception as exc:
-            return self._result(False, "failed", [f"报告生成失败: {exc}"], [])
-
     @staticmethod
     def _write_training_snapshot(task: MenetTask, component: str, config: Dict[str, Any]) -> str:
         path = Path(task.output_dir) / "training_config.json"

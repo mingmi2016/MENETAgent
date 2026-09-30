@@ -22,7 +22,6 @@ const intentLabels = {
   predict_trait: "性状预测",
   evaluate_model: "模型评估",
   explain_model: "模型解释",
-  generate_report: "完整报告",
 };
 const statusLabels = {
   created: "排队中",
@@ -325,7 +324,6 @@ async function renderArtifacts(taskId, container) {
     "training_config.json": "训练参数",
     "test_predictions.csv": "测试集预测",
     "snp_importance.csv": "SNP 重要性",
-    "report.html": "分析报告",
     "task.json": "任务配置",
     "progress.json": "训练进度记录",
     "quality_report.json": "质量评估报告",
@@ -386,7 +384,7 @@ async function renderTask(data, scroll = false) {
     if (previousStatus && !terminalStatuses.has(previousStatus)) {
       document.title = `${intentLabels[data.task?.intent] || "MENET 任务"}${data.status === "completed" ? "已完成" : "已结束"} · MENET Agent`;
       await loadConversationHistory();
-      if (["train_model", "generate_report"].includes(data.task?.intent)) await loadModels();
+      if (["train_model"].includes(data.task?.intent)) await loadModels();
     }
   } else {
     result.classList.add("hidden");

@@ -13,7 +13,6 @@ class TaskIntent(str, Enum):
     PREDICT_TRAIT = "predict_trait"
     EVALUATE_MODEL = "evaluate_model"
     EXPLAIN_MODEL = "explain_model"
-    GENERATE_REPORT = "generate_report"
 
 
 class TaskStatus(str, Enum):

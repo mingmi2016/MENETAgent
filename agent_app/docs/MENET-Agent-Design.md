@@ -56,7 +56,7 @@ LLM 不仅用于训练结果解释，也应参与数据检查、质量判断和�
 
 ### 自然语言入口原则
 
-网页聊天中的用户输入统一先经过意图解析 Harness。`list_models`、`inspect_data`、`train_model`、`predict_trait`、`evaluate_model`、`explain_model` 和 `generate_report` 都属于显式意图协议；数据集名称、模型 ID、性状和训练参数作为结构化参数提取，再由程序对数据库记录和路径进行解析。API 层不能用关键词分支替代意图识别。只有登录、权限、文件格式、路径安全和参数类型校验等确定性边界不交给 LLM。模型服务不可用时才使用规则解析，并在回复中标明降级来源。
+网页聊天中的用户输入统一先经过意图解析 Harness。`list_models`、`inspect_data`、`train_model`、`predict_trait`、`evaluate_model` 和 `explain_model` 都属于显式意图协议；数据集名称、模型 ID、性状和训练参数作为结构化参数提取，再由程序对数据库记录和路径进行解析。API 层不能用关键词分支替代意图识别。只有登录、权限、文件格式、路径安全和参数类型校验等确定性边界不交给 LLM。模型服务不可用时才使用规则解析，并在回复中标明降级来源。
 
 ## MCP Server and External AI
 
@@ -209,7 +209,6 @@ train_menet()
 predict_trait()
 evaluate_model()
 explain_model()
-generate_report()
 ```
 
 建议同时提供细粒度工具和一个高级工作流工具：
@@ -258,7 +257,6 @@ jobs/{user_id}/{job_id}/
     genetic_relatedness.pt
     menet_model.pt
     snp_importance.csv
-    report.html
 ```
 
 ## 6. 规划和任务分解
@@ -280,7 +278,6 @@ jobs/{user_id}/{job_id}/
 6. 训练 MENET
 7. 评估测试集表现
 8. 计算 SNP 或染色体贡献
-9. 生成报告
 ```
 
 这里应区分两种计划：
@@ -381,7 +378,7 @@ MENET 处理的基因型数据可能具有敏感性，至少需要：
 
 ```text
 inspect_data / train_model / predict_trait /
-evaluate_model / explain_model / generate_report
+evaluate_model / explain_model
 ```
 
 适合 MENET，因为数据检查、训练和结果解释的工具集合不同。
@@ -469,7 +466,6 @@ inspect_data
 train_model
 evaluate_model
 explain_model
-generate_report
 ```
 
 推荐调用链：

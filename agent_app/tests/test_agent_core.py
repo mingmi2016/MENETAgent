@@ -13,7 +13,7 @@ from agent.intent import IntentParser
 from agent.llm import AgentIntentParser, CompatibleLLMClient, load_llm_settings, save_llm_settings
 from agent.store import TaskStore
 from agent.tools import MenetTools
-from agent.api import ChatRequest, _latest_compatible_run, _prepare_task_directories, _resolve_dataset, _validate_paths, _with_runtime
+from agent.api import ChatRequest, _latest_compatible_run, _prepare_task_directories, _resolve_dataset, _uses_lsf_backend, _validate_paths, _with_runtime
 from agent.demo_data import register_demo_datasets
 from agent.runner import run_task
 from agent.quality import build_quality_report
@@ -92,6 +92,11 @@ def test_llm_can_classify_model_inventory_request():
 def test_menet_task_normalizes_gpu_device_alias():
     task = MenetTask(trait="culmlength", device="GPU")
     assert task.device == "cuda"
+
+
+def test_lsf_backend_is_reserved_for_training_workflows():
+    assert not _uses_lsf_backend(MenetTask(trait="culmlength", intent=TaskIntent.INSPECT_DATA))
+    assert _uses_lsf_backend(MenetTask(trait="culmlength", intent=TaskIntent.TRAIN_MODEL))
 
 
 def test_local_ollama_client_does_not_require_api_key():
@@ -186,7 +191,6 @@ def test_supported_examples_have_complete_intents():
         TaskIntent.PREDICT_TRAIT: "请预测性状为 culmlength",
         TaskIntent.EVALUATE_MODEL: "请评估模型，性状为 culmlength",
         TaskIntent.EXPLAIN_MODEL: "请解释模型，性状为 culmlength",
-        TaskIntent.GENERATE_REPORT: "请生成报告，性状为 culmlength，随机划分",
     }
     for expected, message in examples.items():
         parsed = IntentParser().parse(message)
@@ -693,17 +697,6 @@ def test_inspection_workflow_returns_structured_failure_for_small_example(tmp_pa
     assert result.status.value == "completed"
     assert result.steps[0]["status"] == "validated"
     assert result.steps[0]["data"]["snp_count"] == 16
-
-
-def test_report_tool_writes_html_from_metrics(tmp_path):
-    output = tmp_path / "run"
-    output.mkdir()
-    (output / "metrics.json").write_text(json.dumps({"test_loss": 1.2, "test_r2": 0.5, "device": "cpu"}))
-    (output / "training_history.json").write_text(json.dumps([{"epoch": 1, "train_loss": 1.0, "val_loss": 1.1, "val_r2": 0.4}]))
-    task = MenetTask(trait="culmlength", output_dir=str(output))
-    result = MenetTools().generate_report(task)
-    assert result["success"]
-    assert (output / "report.html").is_file()
 
 
 def test_api_path_guard_rejects_parent_directory():

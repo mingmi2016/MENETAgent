@@ -83,8 +83,6 @@ class MenetWorkflow:
                 result.status = TaskStatus.FAILED
                 return result
 
-        if task.intent == TaskIntent.GENERATE_REPORT:
-            self._step(result, TaskStatus.EXPLAINING, "generate_report", self.tools.generate_report, task, on_status)
         result.status = TaskStatus.COMPLETED
         return result
 

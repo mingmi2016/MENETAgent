@@ -55,8 +55,11 @@ class LSFExecutor:
 
     def status(self, job_id: str) -> Optional[str]:
         result = subprocess.run(["bjobs", "-noheader", "-o", "stat", job_id], capture_output=True, text=True, check=False)
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if "not found" in combined:
+            return "DONE"
         if result.returncode != 0:
-            return "DONE" if "not found" in (result.stderr or "").lower() else None
+            return None
         value = result.stdout.strip().split()
         return value[0] if value else None
 

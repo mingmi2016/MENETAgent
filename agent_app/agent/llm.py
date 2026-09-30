@@ -245,7 +245,7 @@ class AgentIntentParser:
             data = self.client.complete_json(
                 'You are a MENET domain agent. Return JSON only with keys "intent", "arguments", '
                 '"missing_fields", and "confidence". Allowed intents: list_models, inspect_data, train_model, '
-                "predict_trait, evaluate_model, explain_model, generate_report. Arguments may contain "
+                "predict_trait, evaluate_model, explain_model. Arguments may contain "
                 "trait, dataset_reference, model_id, device, split_strategy, explain_snp, and epochs. "
                 "dataset_reference is the dataset name or species explicitly mentioned by the user; "
                 "model_id is a model_xxx identifier explicitly mentioned by the user. list_models means the user asks "
