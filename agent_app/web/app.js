@@ -8,7 +8,7 @@ let selectedModelId = "";
 let activeTrait = "";
 let datasetNameEdited = false;
 const taskPollers = new Map();
-const DATASET_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024;
+const DATASET_UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 const taskNodes = new Map();
 const knownTaskStatuses = new Map();
 
@@ -149,7 +149,7 @@ function updateUploadFileMeta(inputId, metaId, role) {
   const sizeText = formatFileSize(file.size);
   const warnings = [];
   if (!file.name.toLowerCase().endsWith(".csv")) warnings.push("仅支持 CSV");
-  if (role === "genotype" && file.size > DATASET_UPLOAD_LIMIT_BYTES) warnings.push("超过默认 512 MiB 上限，需要调整服务器配置并做资源预检");
+  if (role === "genotype" && file.size > DATASET_UPLOAD_LIMIT_BYTES) warnings.push("超过默认 2 GiB 上限，需要调整服务器配置并做资源预检");
   if (role === "genotype" && file.size > 1024 ** 3) warnings.push("GB 级 CSV 后续检查和训练可能需要数倍内存");
   target.textContent = `${file.name} · ${sizeText}${warnings.length ? ` · ${warnings.join("；")}` : ""}`;
   target.classList.toggle("warning-text", warnings.length > 0);
@@ -1081,7 +1081,7 @@ $("upload-form").addEventListener("submit", async (event) => {
   try {
     const genotypeFile = $("genotype").files[0];
     if (genotypeFile?.size > DATASET_UPLOAD_LIMIT_BYTES) {
-      notice("基因型文件超过默认 512 MiB 上传上限。需要先调整服务器 MENET_MAX_UPLOAD_BYTES，并确认检查和训练资源。", true);
+      notice("基因型文件超过默认 2 GiB 上传上限。需要先调整服务器 MENET_MAX_UPLOAD_BYTES，并确认检查和训练资源。", true);
       return;
     }
     $("upload-submit").disabled = true;

@@ -453,7 +453,7 @@ MENET_QUEUE_BACKEND=lsf     # 通过 bsub 提交到 LSF 集群
 
 ### GB 级真实用户数据
 
-当前上传接口采用分块写磁盘，因此不会把整个上传文件一次性放入 Web 进程内存；但数据检查和训练仍会通过 `pandas.read_csv` 创建 Pandas、NumPy 和 PyTorch 数据副本。默认数据集上传限制为每个文件 512 MiB，预测基因型文件限制为 2 GiB，这不等于系统已经支持任意 GB 级 CSV 的稳定训练。
+当前上传接口采用分块写磁盘，因此不会把整个上传文件一次性放入 Web 进程内存；但数据检查和训练仍会通过 `pandas.read_csv` 创建 Pandas、NumPy 和 PyTorch 数据副本。默认数据集和预测基因型上传限制均为每个文件 2 GiB，可通过 `MENET_MAX_UPLOAD_BYTES` 调整。这只解决文件传输和落盘上限，不等于系统已经支持任意 GB 级 CSV 的稳定检查或训练；PLINK 等原始格式仍需要单独的解析和预处理链路。
 
 真实数据上线前必须验证：
 

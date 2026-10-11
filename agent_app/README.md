@@ -146,7 +146,7 @@ The local workstation remains on `MENET_QUEUE_BACKEND=thread` and `.venv`; these
 
 ### Real-data and hyperparameter roadmap
 
-The current upload endpoint streams files to disk in chunks, but the data-validation and training pipeline still reads CSV matrices into Pandas, NumPy, and PyTorch copies. The default dataset upload limit is 512 MiB per file; prediction-genotype uploads allow up to 2 GiB. These limits are not a claim that arbitrary gigabyte-scale training is supported.
+The current upload endpoint streams files to disk in chunks, but the data-validation and training pipeline still reads CSV matrices into Pandas, NumPy, and PyTorch copies. The default dataset upload limit is 2 GiB per file; prediction-genotype uploads also allow up to 2 GiB. These limits only cover transport and storage, not arbitrary gigabyte-scale CSV validation or training. The limit remains configurable with `MENET_MAX_UPLOAD_BYTES`.
 
 Before accepting large production datasets, validate the complete path: reverse proxy limits, available upload storage, shared visibility from `login` and `gpu01`, memory required by data inspection, and GPU memory required by training. Preserve the original upload, calculate a checksum, and consider converting large genotype data to Parquet, memory-mapped arrays, or a supported binary/genotype format. Add chunked inspection, per-user storage quotas, resource estimation, resumable uploads, and cleanup policies before treating multi-gigabyte CSV training as production-ready.
 

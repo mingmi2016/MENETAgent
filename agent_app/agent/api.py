@@ -430,7 +430,9 @@ async def upload_dataset(
     (dataset_dir / "phenotype").mkdir(parents=True, exist_ok=False)
     genotype_path = dataset_dir / "genotype" / "genotype.csv"
     phenotype_path = dataset_dir / "phenotype" / f"{trait}.csv"
-    max_bytes = int(os.environ.get("MENET_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024)))
+    # Dataset uploads are streamed to disk, so allow the raw archive size used by
+    # the real maize datasets while keeping the limit configurable per deployment.
+    max_bytes = int(os.environ.get("MENET_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
     try:
         genotype_meta = await _save_upload(genotype, genotype_path, max_bytes)
         phenotype_meta = await _save_upload(phenotype, phenotype_path, max_bytes)
