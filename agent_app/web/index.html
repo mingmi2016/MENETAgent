@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MENET Agent</title>
-  <link rel="stylesheet" href="/app/style.css?v=20260926-1">
+  <link rel="stylesheet" href="/app/style.css?v=20260930-1">
 </head>
 <body>
   <header class="topbar">
@@ -26,11 +26,21 @@
           <div class="message agent"><span class="avatar">M</span><div><p>选择一套数据，然后告诉我你想检查、训练、预测还是解释结果。</p>
             <div class="capability-list">
               <button data-template="请检查数据，性状为 {trait}"><strong>检查数据</strong><small>样本、SNP、缺失与编码</small></button>
-              <button data-template="请训练模型，性状为 {trait}，使用 GPU，训练 50 轮"><strong>训练模型</strong><small>GPU、50 轮，可修改</small></button>
+              <button data-action="train"><strong>训练模型</strong><small id="train-template-summary">GPU、50 轮，可修改</small></button>
               <button data-template="请预测性状为 {trait}"><strong>预测性状</strong><small>自动复用最近的兼容模型</small></button>
               <button data-template="请评估模型，性状为 {trait}"><strong>评估模型</strong><small>自动读取最近训练结果</small></button>
               <button data-template="请解释模型，性状为 {trait}"><strong>解释模型</strong><small>模块贡献和训练表现</small></button>
             </div>
+            <details class="training-settings" id="training-settings">
+              <summary>训练参数</summary>
+              <div class="training-settings-grid">
+                <label>设备<select id="train-device"><option value="cuda">GPU</option><option value="auto">自动</option><option value="cpu">CPU</option></select></label>
+                <label>轮数<input id="train-epochs" type="number" min="1" max="1000" step="1" value="50"></label>
+                <label>数据划分<select id="train-split"><option value="auto">自动判断</option><option value="random">随机划分</option><option value="existing">使用已有 split</option></select></label>
+                <label>模式<select id="train-mode"><option value="basic">基础模式</option><option value="auto" disabled>自动模式（规划中）</option></select></label>
+              </div>
+              <p class="field-help">当前后端已支持设备、轮数和划分方式；学习率、batch size、dropout 等高级调参仍在规划中，不在这里伪装成可生效参数。</p>
+            </details>
           </div></div>
         </div>
         <form id="chat-form" class="composer"><textarea id="message" rows="2" placeholder="例如：请训练当前水稻株高数据，使用 GPU，训练 50 轮" required></textarea><button class="send-button" title="发送">发送 <span>-></span></button></form>
@@ -58,12 +68,13 @@
           <details id="dataset-inspection" class="foldout"><summary><span>数据详情与质量</span><button id="refresh-inspection" class="icon-button" type="button" title="重新检查当前数据">刷新检查</button></summary><div id="dataset-inspection-result" class="dataset-summary empty">选择数据集后自动检查，或点击“刷新检查”。</div></details>
           <details id="upload-details" class="foldout"><summary>上传新数据</summary>
             <form id="upload-form">
-              <label>基因型文件<input id="genotype" type="file" accept=".csv" required></label>
-              <label>表型文件<input id="phenotype" type="file" accept=".csv" required><small id="trait-detection" class="field-help">系统将从表型文件列名识别性状，识别后仍可修改。</small></label>
+              <label>基因型文件<input id="genotype" type="file" accept=".csv" required><small id="genotype-file-meta" class="field-help">CSV 文件，默认上传上限 512 MiB；GB 级数据建议先做资源预检。</small></label>
+              <label>表型文件<input id="phenotype" type="file" accept=".csv" required><small id="phenotype-file-meta" class="field-help">CSV 文件，通常远小于基因型文件。</small><small id="trait-detection" class="field-help">系统将从表型文件列名识别性状，识别后仍可修改。</small></label>
               <label>物种<select id="upload-species" required><option value="">请选择物种</option><option>Oryza sativa (rice)</option><option>Triticum aestivum (wheat)</option><option>Zea mays (maize)</option><option>Glycine max (soybean)</option><option>Hordeum vulgare (barley)</option><option>Sorghum bicolor (sorghum)</option><option>Brassica napus (rapeseed)</option><option>Gossypium hirsutum (cotton)</option><option>Solanum lycopersicum (tomato)</option><option>Arabidopsis thaliana</option><option value="__custom__">其他物种</option></select><input id="upload-species-custom" class="hidden" placeholder="输入物种名称"></label>
               <label>性状名称<input id="upload-trait" name="trait" list="upload-trait-options" placeholder="选择表型文件后自动识别" required><datalist id="upload-trait-options"></datalist></label>
               <label>数据集名称<input id="upload-dataset-name" placeholder="选择物种和表型文件后自动推荐" required><small class="field-help">系统会生成“物种_性状_日期”，也可以自行修改。</small></label>
-              <button class="button secondary" type="submit">上传并设为当前数据 <span>-></span></button>
+              <button id="upload-submit" class="button secondary" type="submit">上传并设为当前数据 <span>-></span></button>
+              <div id="upload-progress" class="upload-progress hidden"><div class="progress"><span></span></div><small>等待上传</small></div>
             </form>
           </details>
           <details id="prediction-details" class="foldout"><summary>上传待预测基因型</summary>
@@ -99,6 +110,6 @@
   <dialog id="task-confirm" class="confirm-dialog"><h3>确认开始长任务</h3><p id="confirm-summary"></p><p class="field-help">任务会在后台执行，可以离开页面后再从历史会话中查看。</p><div class="dialog-actions"><button id="cancel-run" class="button secondary" type="button">返回修改</button><button id="confirm-run" class="button primary" type="button">开始运行</button></div></dialog>
   <dialog id="auth-dialog" class="auth-dialog"><form id="auth-form" method="dialog"><div class="auth-dialog-heading"><div><p class="kicker">ACCOUNT</p><h2 id="auth-title">登录 MENET Agent</h2></div><button id="auth-close" class="icon-button" type="button" aria-label="关闭">×</button></div><label>用户名<input id="auth-username" name="username" autocomplete="username" required></label><label>密码<input id="auth-password" name="password" type="password" minlength="8" autocomplete="current-password" required></label><p class="field-help">账号由管理员创建，请使用管理员分配的用户名和密码。</p><p id="auth-error" class="inline-result error hidden"></p><div class="auth-dialog-actions"><span></span><button class="primary-button" type="submit">登录</button></div></form></dialog>
   <dialog id="user-dialog" class="user-dialog"><div class="auth-dialog-heading"><div><p class="kicker">ADMINISTRATION</p><h2>用户管理</h2></div><button id="user-dialog-close" class="icon-button" type="button" aria-label="关闭">×</button></div><div id="user-list" class="user-list"></div><form id="user-form" class="user-form"><h3>新增用户</h3><div class="user-form-grid"><label>用户名<input id="new-username" required autocomplete="off"></label><label>显示名称<input id="new-display-name" required></label><label>初始密码<input id="new-password" type="password" minlength="8" required autocomplete="new-password"></label><label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label></div><p id="user-form-error" class="inline-result error hidden"></p><div class="dialog-actions"><button class="primary-button" type="submit">创建用户</button></div></form></dialog>
-  <script src="/app/app.js?v=20260926-2"></script>
+  <script src="/app/app.js?v=20260930-1"></script>
 </body>
 </html>

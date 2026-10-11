@@ -29,7 +29,7 @@ The current 8010 service provides the REST/Web Agent interfaces. A local `stdio`
 
 ## User accounts for shared deployment
 
-The Web/API service stores users and hashed passwords, sessions, conversations, tasks, datasets and model metadata in SQLite. Passwords are never stored in plain text. The current deployment uses `MENET_AUTH_MODE=required`, so every non-auth API request requires a login session. The same code and database are used locally and on the cluster; only the deployment `.env` changes when a different policy is needed. The Web UI provides login and logout, while account creation is administrator-only. Create the first administrator from the application directory with `PYTHONPATH=. python scripts/create_user.py admin 管理员 --role admin`; the command prompts for the password. The authentication endpoints are `POST /api/v1/auth/login`, `GET /api/v1/auth/me` and `POST /api/v1/auth/logout`.
+The Web/API service stores users and hashed passwords, sessions, conversations, tasks, datasets and model metadata in SQLite. Passwords are never stored in plain text. For a shared server deployment, set `MENET_AUTH_MODE=required` so every non-auth API request requires a login session. The same code and database are used locally and on the cluster; only the deployment `.env` changes when a different policy is needed. The Web UI provides login and logout, while account creation is administrator-only. Create the first administrator from the application directory with `PYTHONPATH=. python scripts/create_user.py admin 管理员 --role admin`; the command prompts for the password. The authentication endpoints are `POST /api/v1/auth/login`, `GET /api/v1/auth/me` and `POST /api/v1/auth/logout`.
 
 ## Local MCP
 
@@ -79,7 +79,7 @@ Without an enabled or reachable LLM, the service uses the deterministic rule par
 
 ## Model assets
 
-Successful training and report tasks automatically create a model record backed by the immutable task output directory. Existing successful runs are registered during service startup. The Web UI shows the selected model's trait, training sample/SNP counts and test R². Archiving removes a model from normal selection without deleting its reproducibility artifacts.
+Successful training tasks automatically create a model record backed by the immutable task output directory. Existing successful runs are registered during service startup. The Web UI shows the selected model's trait, training sample/SNP counts and test R². Archiving removes a model from normal selection without deleting its reproducibility artifacts.
 
 The REST surface includes `GET /api/v1/models`, `GET /api/v1/models/{model_id}`, `PATCH /api/v1/models/{model_id}` and `DELETE /api/v1/models/{model_id}`. Prediction, evaluation and explanation requests can pass `model_id`; the task then records the model ID and name and rejects trait mismatches.
 
@@ -128,3 +128,34 @@ bash scripts/start_agent.sh
 ```
 
 `start_agent.sh` loads `agent_app/.env` when it exists. The Web/API process uses `menet-web`; submitted GPU workers use `torch_gpu`. Do not create a `.venv` on the server for this deployment. The local workstation may continue to use its own `.venv`.
+
+
+### Next hardening steps
+
+The current deployment is functional, but the following work should be completed before opening the service to a wider group of users:
+
+1. Enable and verify authentication. Set `MENET_AUTH_MODE=required` on the server, create an administrator account, and verify that users cannot read or modify another user's tasks, datasets, models, or artifacts. For HTTPS, also set `MENET_COOKIE_SECURE=1`.
+2. Reconcile LSF state after service restarts. On startup, inspect `.lsf_job_id` with `bjobs` instead of immediately marking an active task as failed. Keep `PEND` and `RUN` tasks alive, import `result.json` for `DONE`, and mark `EXIT` or `ZOMBI` jobs as failed.
+3. Add an end-to-end LSF smoke test covering submission, `PEND`/`RUN` status, GPU completion, result loading, model registration, cancellation, and the rule that only `train_model` uses LSF.
+4. Harden LSF submission and logging. Prefer a fixed worker script with `task.json` arguments over shell command construction, and record command failures, timeouts, `bsub`, `bjobs`, and `bkill` output.
+5. Serialize repeated validation runs or enforce a concurrency limit so repeated GPU training does not exhaust the allocated GPU memory.
+6. Run the Web service under a restart policy with log rotation and health checks instead of relying only on `nohup`.
+
+The local workstation remains on `MENET_QUEUE_BACKEND=thread` and `.venv`; these hardening steps do not change the local execution model.
+
+
+### Real-data and hyperparameter roadmap
+
+The current upload endpoint streams files to disk in chunks, but the data-validation and training pipeline still reads CSV matrices into Pandas, NumPy, and PyTorch copies. The default dataset upload limit is 512 MiB per file; prediction-genotype uploads allow up to 2 GiB. These limits are not a claim that arbitrary gigabyte-scale training is supported.
+
+Before accepting large production datasets, validate the complete path: reverse proxy limits, available upload storage, shared visibility from `login` and `gpu01`, memory required by data inspection, and GPU memory required by training. Preserve the original upload, calculate a checksum, and consider converting large genotype data to Parquet, memory-mapped arrays, or a supported binary/genotype format. Add chunked inspection, per-user storage quotas, resource estimation, resumable uploads, and cleanup policies before treating multi-gigabyte CSV training as production-ready.
+
+Training currently exposes `device`, `epochs`, split strategy, random seeds, and SNP explanation. The model learning rate, batch size, dropout, weight decay, margin, and network dimensions remain configuration-driven. The planned control model is:
+
+- automatic mode chooses a conservative configuration from sample/SNP counts and available resources;
+- basic mode lets users change the supported device, epoch count, split strategy, and seed;
+- advanced mode exposes only validated hyperparameters with bounded ranges;
+- controlled search evaluates candidates on training/validation data only, locks the chosen configuration, and evaluates the test set once at the end;
+- the LLM may explain metrics and propose candidates, but cannot directly write arbitrary configuration or select a model using test-set performance.
+
+Every trial must save its configuration, seed, validation metrics, resource usage, and selected checkpoint so that a result can be reproduced.

@@ -8,6 +8,7 @@ let selectedModelId = "";
 let activeTrait = "";
 let datasetNameEdited = false;
 const taskPollers = new Map();
+const DATASET_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024;
 const taskNodes = new Map();
 const knownTaskStatuses = new Map();
 
@@ -131,6 +132,79 @@ function showLlmResult(message, error = false) {
   const element = $("llm-result");
   element.textContent = message;
   element.className = "inline-result" + (error ? " error" : "");
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${value} B`;
+}
+
+function updateUploadFileMeta(inputId, metaId, role) {
+  const file = $(inputId).files[0];
+  const target = $(metaId);
+  if (!file) return;
+  const sizeText = formatFileSize(file.size);
+  const warnings = [];
+  if (!file.name.toLowerCase().endsWith(".csv")) warnings.push("仅支持 CSV");
+  if (role === "genotype" && file.size > DATASET_UPLOAD_LIMIT_BYTES) warnings.push("超过默认 512 MiB 上限，需要调整服务器配置并做资源预检");
+  if (role === "genotype" && file.size > 1024 ** 3) warnings.push("GB 级 CSV 后续检查和训练可能需要数倍内存");
+  target.textContent = `${file.name} · ${sizeText}${warnings.length ? ` · ${warnings.join("；")}` : ""}`;
+  target.classList.toggle("warning-text", warnings.length > 0);
+}
+
+function updateTrainingSummary() {
+  const device = { cuda: "GPU", auto: "自动设备", cpu: "CPU" }[$("train-device")?.value || "cuda"];
+  const epochs = $("train-epochs")?.value || "50";
+  const split = { auto: "自动判断划分", random: "随机划分", existing: "已有 split" }[$("train-split")?.value || "auto"];
+  const target = $("train-template-summary");
+  if (target) target.textContent = `${device}、${epochs} 轮、${split}`;
+}
+
+function trainingPrompt() {
+  const trait = activeTrait || "plant_height";
+  const device = $("train-device")?.value || "cuda";
+  const epochs = Math.max(1, Number.parseInt($("train-epochs")?.value || "50", 10) || 50);
+  const split = $("train-split")?.value || "auto";
+  const deviceText = device === "cuda" ? "使用 GPU" : device === "cpu" ? "使用 CPU" : "使用自动设备";
+  const splitText = split === "random" ? "，自动划分数据" : split === "existing" ? "，使用已有 split" : "";
+  return `请训练模型，性状为 ${trait}，${deviceText}，训练 ${epochs} 轮${splitText}`;
+}
+
+function setUploadProgress(percent, message) {
+  const box = $("upload-progress");
+  const bar = box?.querySelector(".progress span");
+  const label = box?.querySelector("small");
+  if (!box || !bar || !label) return;
+  box.classList.remove("hidden");
+  bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  label.textContent = message;
+}
+
+function uploadRequest(url, form) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        setUploadProgress((event.loaded / event.total) * 100, `正在上传 ${formatFileSize(event.loaded)} / ${formatFileSize(event.total)}`);
+      } else {
+        setUploadProgress(8, "正在上传，服务器未返回总大小");
+      }
+    };
+    xhr.onload = () => {
+      const data = JSON.parse(xhr.responseText || "{}");
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(Array.isArray(data.detail) ? data.detail.join("；") : data.detail || "上传失败"));
+    };
+    xhr.onerror = () => reject(new Error("上传连接失败"));
+    xhr.onabort = () => reject(new Error("上传已取消"));
+    setUploadProgress(1, "准备上传");
+    xhr.send(form);
+  });
 }
 
 async function request(url, options) {
@@ -280,6 +354,7 @@ function runtimeMessage(data) {
   if (runtime.epoch_progress) {
     parts.push(`轮次 ${runtime.epoch_progress.current_epoch}/${runtime.epoch_progress.total_epochs}`);
   }
+  if (runtime.lsf_job_id) parts.push(`LSF ${runtime.lsf_job_id}${runtime.lsf_status ? `/${runtime.lsf_status}` : ""}`);
   if (runtime.queue_seconds > 0) parts.push(`排队 ${formatDuration(runtime.queue_seconds)}`);
   if (!runtime.terminal && runtime.estimated_seconds_low != null) {
     parts.push(`预计总耗时 ${formatDuration(runtime.estimated_seconds_low)} - ${formatDuration(runtime.estimated_seconds_high)}`);
@@ -978,7 +1053,13 @@ $("archive-model").addEventListener("click", async () => {
   } catch (error) { notice(error.message, true); }
 });
 
-$("phenotype").addEventListener("change", inferTraitsFromPhenotype);
+$("genotype").addEventListener("change", () => updateUploadFileMeta("genotype", "genotype-file-meta", "genotype"));
+$("phenotype").addEventListener("change", () => {
+  updateUploadFileMeta("phenotype", "phenotype-file-meta", "phenotype");
+  inferTraitsFromPhenotype();
+});
+["train-device", "train-epochs", "train-split", "train-mode"].forEach((id) => $(id)?.addEventListener("input", updateTrainingSummary));
+updateTrainingSummary();
 $("upload-species").addEventListener("input", () => updateRecommendedDatasetName());
 $("upload-trait").addEventListener("input", () => updateRecommendedDatasetName());
 $("upload-dataset-name").addEventListener("input", () => { datasetNameEdited = true; });
@@ -998,20 +1079,35 @@ $("upload-form").addEventListener("submit", async (event) => {
     user_id: currentUserId,
   });
   try {
-    const data = await request(`/api/v1/datasets/upload?${query}`, { method: "POST", body: form });
+    const genotypeFile = $("genotype").files[0];
+    if (genotypeFile?.size > DATASET_UPLOAD_LIMIT_BYTES) {
+      notice("基因型文件超过默认 512 MiB 上传上限。需要先调整服务器 MENET_MAX_UPLOAD_BYTES，并确认检查和训练资源。", true);
+      return;
+    }
+    $("upload-submit").disabled = true;
+    const data = await uploadRequest(`/api/v1/datasets/upload?${query}`, form);
     $("dataset-dir").value = data.dataset_dir;
     $("dataset-result").textContent = `数据已登记：${data.name}`;
     $("dataset-result").classList.remove("hidden");
     await loadDatasets(data.dataset_id);
+    setUploadProgress(100, "上传完成，数据集已登记");
     notice("数据上传完成，并已设为当前数据。");
   } catch (error) {
     notice(error.message, true);
+    setUploadProgress(100, `上传失败：${error.message}`);
+  } finally {
+    $("upload-submit").disabled = false;
   }
 });
 
 document.querySelectorAll("[data-template]").forEach((button) => button.addEventListener("click", () => {
   const trait = activeTrait || "plant_height";
   $("message").value = button.dataset.template.replaceAll("{trait}", trait);
+  $("message").focus();
+}));
+
+document.querySelectorAll("[data-action='train']").forEach((button) => button.addEventListener("click", () => {
+  $("message").value = trainingPrompt();
   $("message").focus();
 }));
 
