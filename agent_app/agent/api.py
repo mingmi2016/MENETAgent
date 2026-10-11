@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 import statistics
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -382,6 +383,30 @@ def list_datasets(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     return {"datasets": store.list_datasets(user_id)}
 
 
+def _requires_raw_preprocessing(dataset: Dict[str, Any]) -> bool:
+    genotype_name = str(dataset.get("genotype_filename", "")).lower()
+    phenotype_name = str(dataset.get("phenotype_filename", "")).lower()
+    return genotype_name.endswith((".bed.tar.gz", ".tar.gz")) or Path(phenotype_name).suffix in {".pheno", ".tsv", ".txt"}
+
+
+def _validate_plink_archive(path: Path) -> None:
+    required = {".bed": False, ".bim": False, ".fam": False}
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                suffix = Path(member.name).suffix.lower()
+                if suffix in required:
+                    required[suffix] = True
+                if all(required.values()):
+                    return
+    except (OSError, tarfile.TarError) as exc:
+        raise HTTPException(status_code=400, detail=f"PLINK 压缩包无法读取：{exc}") from exc
+    missing = ", ".join(suffix for suffix, present in required.items() if not present)
+    raise HTTPException(status_code=400, detail=f"PLINK 压缩包缺少必要文件：{missing}")
+
+
 @app.get("/api/v1/datasets/{dataset_id}")
 def get_dataset(dataset_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     dataset = store.get_dataset(dataset_id, user_id)
@@ -395,6 +420,17 @@ def inspect_registered_dataset(dataset_id: str, user_id: str = DEFAULT_USER_ID) 
     dataset = store.get_dataset(dataset_id, user_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="数据集不存在")
+    if _requires_raw_preprocessing(dataset):
+        return {
+            "dataset": dataset,
+            "inspection": {
+                "status": "pending",
+                "messages": ["原始 PLINK/PHENO 文件已上传，等待预处理后才能进行完整数据检查。"],
+                "data": {"input_format": "plink_archive", "preprocessing_required": True},
+                "errors": [],
+                "warnings": [],
+            },
+        }
     task = MenetTask(
         owner_user_id=user_id,
         dataset_dir=dataset["dataset_dir"],
@@ -421,21 +457,30 @@ async def upload_dataset(
     _require_user(user_id)
     if not trait or Path(trait).name != trait or any(char in trait for char in "/\\"):
         raise HTTPException(status_code=400, detail="非法性状名称")
-    allowed = {".csv"}
-    if Path(genotype.filename or "").suffix.lower() not in allowed or Path(phenotype.filename or "").suffix.lower() not in allowed:
-        raise HTTPException(status_code=400, detail="当前仅支持 CSV 文件")
+    genotype_name = Path(genotype.filename or "").name
+    phenotype_name = Path(phenotype.filename or "").name
+    genotype_is_csv = genotype_name.lower().endswith(".csv")
+    genotype_is_plink = genotype_name.lower().endswith((".bed.tar.gz", ".tar.gz"))
+    phenotype_is_csv = phenotype_name.lower().endswith(".csv")
+    phenotype_is_pheno = Path(phenotype_name).suffix.lower() in {".pheno", ".tsv", ".txt"}
+    if not (genotype_is_csv or genotype_is_plink) or not (phenotype_is_csv or phenotype_is_pheno):
+        raise HTTPException(status_code=400, detail="基因型支持 CSV 或 PLINK .tar.gz；表型支持 CSV、.pheno、TSV、TXT")
     dataset_id = f"dataset_{uuid4().hex[:12]}"
     dataset_dir = service_root / "uploads" / user_id / dataset_id
     (dataset_dir / "genotype").mkdir(parents=True, exist_ok=False)
     (dataset_dir / "phenotype").mkdir(parents=True, exist_ok=False)
-    genotype_path = dataset_dir / "genotype" / "genotype.csv"
-    phenotype_path = dataset_dir / "phenotype" / f"{trait}.csv"
+    genotype_path = (dataset_dir / "genotype" / "genotype.csv") if genotype_is_csv else (dataset_dir / "genotype" / "source" / genotype_name)
+    phenotype_path = (dataset_dir / "phenotype" / f"{trait}.csv") if phenotype_is_csv else (dataset_dir / "phenotype" / "source" / phenotype_name)
+    genotype_path.parent.mkdir(parents=True, exist_ok=True)
+    phenotype_path.parent.mkdir(parents=True, exist_ok=True)
     # Dataset uploads are streamed to disk, so allow the raw archive size used by
     # the real maize datasets while keeping the limit configurable per deployment.
     max_bytes = int(os.environ.get("MENET_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
     try:
         genotype_meta = await _save_upload(genotype, genotype_path, max_bytes)
         phenotype_meta = await _save_upload(phenotype, phenotype_path, max_bytes)
+        if genotype_is_plink:
+            _validate_plink_archive(genotype_path)
     except Exception:
         shutil.rmtree(dataset_dir, ignore_errors=True)
         raise
@@ -453,6 +498,9 @@ async def upload_dataset(
         "genotype_sha256": genotype_meta["sha256"],
         "phenotype_sha256": phenotype_meta["sha256"],
     }
+    if genotype_is_plink or phenotype_is_pheno:
+        dataset["preprocessing_status"] = "pending"
+        dataset["input_format"] = "plink_archive"
     store.create_dataset(dataset)
     if conversation_id:
         current = store.get_conversation(conversation_id, user_id=user_id)

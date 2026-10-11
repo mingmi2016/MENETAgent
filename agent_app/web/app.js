@@ -51,6 +51,7 @@ function clearNotice() {
 
 function parseCsvHeader(text) {
   const firstLine = text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] || "";
+  const delimiter = firstLine.includes("\t") ? "\t" : ",";
   const fields = [];
   let value = "";
   let quoted = false;
@@ -63,7 +64,7 @@ function parseCsvHeader(text) {
       } else {
         quoted = !quoted;
       }
-    } else if (character === "," && !quoted) {
+    } else if (character === delimiter && !quoted) {
       fields.push(value.trim());
       value = "";
     } else {
@@ -148,7 +149,11 @@ function updateUploadFileMeta(inputId, metaId, role) {
   if (!file) return;
   const sizeText = formatFileSize(file.size);
   const warnings = [];
-  if (!file.name.toLowerCase().endsWith(".csv")) warnings.push("仅支持 CSV");
+  const filename = file.name.toLowerCase();
+  const supported = role === "genotype"
+    ? filename.endsWith(".csv") || filename.endsWith(".tar.gz")
+    : filename.endsWith(".csv") || filename.endsWith(".pheno") || filename.endsWith(".tsv") || filename.endsWith(".txt");
+  if (!supported) warnings.push(role === "genotype" ? "支持 CSV 或 PLINK .tar.gz" : "支持 CSV、.pheno、TSV、TXT");
   if (role === "genotype" && file.size > DATASET_UPLOAD_LIMIT_BYTES) warnings.push("超过默认 2 GiB 上限，需要调整服务器配置并做资源预检");
   if (role === "genotype" && file.size > 1024 ** 3) warnings.push("GB 级 CSV 后续检查和训练可能需要数倍内存");
   target.textContent = `${file.name} · ${sizeText}${warnings.length ? ` · ${warnings.join("；")}` : ""}`;
@@ -1087,11 +1092,15 @@ $("upload-form").addEventListener("submit", async (event) => {
     $("upload-submit").disabled = true;
     const data = await uploadRequest(`/api/v1/datasets/upload?${query}`, form);
     $("dataset-dir").value = data.dataset_dir;
-    $("dataset-result").textContent = `数据已登记：${data.name}`;
+    $("dataset-result").textContent = data.preprocessing_status === "pending"
+      ? "原始数据已上传，等待预处理：" + data.name
+      : "数据已登记：" + data.name;
     $("dataset-result").classList.remove("hidden");
     await loadDatasets(data.dataset_id);
     setUploadProgress(100, "上传完成，数据集已登记");
-    notice("数据上传完成，并已设为当前数据。");
+    notice(data.preprocessing_status === "pending"
+      ? "原始文件上传完成，已登记，等待 PLINK 预处理后才能检查和训练。"
+      : "数据上传完成，并已设为当前数据。");
   } catch (error) {
     notice(error.message, true);
     setUploadProgress(100, `上传失败：${error.message}`);
