@@ -128,6 +128,7 @@ class TaskStore:
             self._ensure_column(connection, "datasets", "is_demo", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "datasets", "sample_count", "INTEGER")
             self._ensure_column(connection, "datasets", "snp_count", "INTEGER")
+            self._ensure_column(connection, "datasets", "available_traits_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(connection, "conversations", "user_id", "TEXT NOT NULL DEFAULT 'user_local'")
             self._ensure_column(connection, "conversations", "deleted_at", "TEXT")
             now = self._now()
@@ -407,8 +408,8 @@ class TaskStore:
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO datasets(dataset_id,user_id,name,species,trait,dataset_dir,genotype_filename,phenotype_filename,"
-                "genotype_size,phenotype_size,genotype_sha256,phenotype_sha256,source_url,license,is_demo,sample_count,snp_count,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "genotype_size,phenotype_size,genotype_sha256,phenotype_sha256,source_url,license,is_demo,sample_count,snp_count,available_traits_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     dataset["dataset_id"], dataset.get("user_id", DEFAULT_USER_ID), dataset.get("name", ""),
                     dataset.get("species", ""), dataset["trait"], dataset["dataset_dir"],
@@ -416,7 +417,7 @@ class TaskStore:
                     dataset["genotype_size"], dataset["phenotype_size"],
                     dataset["genotype_sha256"], dataset["phenotype_sha256"], dataset.get("source_url", ""),
                     dataset.get("license", ""), int(bool(dataset.get("is_demo", False))),
-                    dataset.get("sample_count"), dataset.get("snp_count"), self._now(),
+                    dataset.get("sample_count"), dataset.get("snp_count"), json.dumps(dataset.get("available_traits", []), ensure_ascii=False), self._now(),
                 ),
             )
 
@@ -432,13 +433,13 @@ class TaskStore:
             connection.execute(
                 "UPDATE datasets SET name=?,species=?,trait=?,dataset_dir=?,genotype_filename=?,phenotype_filename=?,"
                 "genotype_size=?,phenotype_size=?,genotype_sha256=?,phenotype_sha256=?,source_url=?,license=?,"
-                "is_demo=?,sample_count=?,snp_count=? WHERE dataset_id=?",
+                "is_demo=?,sample_count=?,snp_count=?,available_traits_json=? WHERE dataset_id=?",
                 (
                     dataset.get("name", ""), dataset.get("species", ""), dataset["trait"], dataset["dataset_dir"],
                     dataset["genotype_filename"], dataset["phenotype_filename"], dataset["genotype_size"],
                     dataset["phenotype_size"], dataset["genotype_sha256"], dataset["phenotype_sha256"],
                     dataset.get("source_url", ""), dataset.get("license", ""), int(bool(dataset.get("is_demo", False))),
-                    dataset.get("sample_count"), dataset.get("snp_count"), dataset["dataset_id"],
+                    dataset.get("sample_count"), dataset.get("snp_count"), json.dumps(dataset.get("available_traits", []), ensure_ascii=False), dataset["dataset_id"],
                 ),
             )
 
@@ -469,6 +470,17 @@ class TaskStore:
                 params += (user_id,)
             row = connection.execute(query, params).fetchone()
         return dict(row) if row else None
+
+    def update_dataset_trait(self, dataset_id: str, user_id: str, trait: str) -> Optional[Dict[str, Any]]:
+        dataset = self.get_dataset(dataset_id, user_id)
+        if dataset is None:
+            return None
+        available = json.loads(dataset.get("available_traits_json") or "[]")
+        if available and trait not in available:
+            raise ValueError("该性状不在数据集可用性状列表中")
+        with self._connect() as connection:
+            connection.execute("UPDATE datasets SET trait=? WHERE dataset_id=? AND user_id=?", (trait, dataset_id, user_id))
+        return self.get_dataset(dataset_id, user_id)
 
     def list_datasets(self, user_id: str = DEFAULT_USER_ID, limit: int = 50) -> list:
         with self._connect() as connection:
@@ -579,7 +591,13 @@ class TaskStore:
     def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            try:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            except sqlite3.OperationalError as exc:
+                # Another service process may have applied the same migration
+                # between PRAGMA and ALTER TABLE.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
     @staticmethod
     def _now() -> str:

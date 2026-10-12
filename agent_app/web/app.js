@@ -601,6 +601,7 @@ async function loadDatasets(selectedId = "") {
     const option = new Option(`${demo}${dataset.name || dataset.trait}${scale}`, dataset.dataset_id);
     option.dataset.directory = dataset.dataset_dir;
     option.dataset.trait = dataset.trait;
+    option.dataset.traits = JSON.stringify(dataset.available_traits || (dataset.trait ? [dataset.trait] : []));
     option.dataset.name = dataset.name;
     option.dataset.species = dataset.species;
     option.dataset.samples = dataset.sample_count || "";
@@ -704,6 +705,12 @@ function applySelectedDataset() {
     return;
   }
   activeTrait = option.dataset.trait;
+  const traits = JSON.parse(option.dataset.traits || "[]");
+  const traitPicker = $("dataset-trait-picker");
+  const traitSelect = $("dataset-trait-select");
+  traitSelect.replaceChildren(...traits.map((trait) => new Option(trait, trait)));
+  traitSelect.value = activeTrait;
+  traitPicker.classList.toggle("hidden", traits.length <= 1);
   $("dataset-dir").value = option.dataset.directory;
   const modelOption = $("trained-model-select").selectedOptions[0];
   if (modelOption?.value && (modelOption.dataset.datasetId !== option.value || modelOption.dataset.trait !== activeTrait)) {
@@ -985,6 +992,18 @@ $("user-form").addEventListener("submit", async (event) => {
 $("dataset-select").addEventListener("change", async () => {
   applySelectedDataset();
   await loadModels();
+});
+
+$("dataset-trait-select")?.addEventListener("change", async (event) => {
+  const datasetId = $("dataset-select").value;
+  const trait = event.target.value;
+  if (!datasetId || !trait) return;
+  try {
+    await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/trait?${userQuery()}&trait=${encodeURIComponent(trait)}`, { method: "PATCH" });
+    activeTrait = trait;
+    await loadDatasets(datasetId);
+    notice(`当前数据集性状已切换为 ${trait}。`);
+  } catch (error) { notice(error.message, true); }
 });
 $("trained-model-select").addEventListener("change", applySelectedModel);
 $("dataset-inspection").addEventListener("toggle", (event) => {

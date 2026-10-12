@@ -7,6 +7,7 @@ import re
 import shutil
 import statistics
 import tarfile
+import csv
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -380,13 +381,59 @@ def get_conversation(conversation_id: str, user_id: str = DEFAULT_USER_ID) -> Di
 @app.get("/api/v1/datasets")
 def list_datasets(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     _require_user(user_id)
-    return {"datasets": store.list_datasets(user_id)}
+    return {"datasets": [_public_dataset(item) for item in store.list_datasets(user_id)]}
 
 
 def _requires_raw_preprocessing(dataset: Dict[str, Any]) -> bool:
     genotype_name = str(dataset.get("genotype_filename", "")).lower()
     phenotype_name = str(dataset.get("phenotype_filename", "")).lower()
     return genotype_name.endswith((".bed.tar.gz", ".tar.gz")) or Path(phenotype_name).suffix in {".pheno", ".tsv", ".txt"}
+
+
+def _public_dataset(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    value = dict(dataset)
+    try:
+        value["available_traits"] = json.loads(value.pop("available_traits_json", "[]") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        value["available_traits"] = []
+    return value
+
+
+def _phenotype_traits(path: Path) -> list[str]:
+    line = path.open("r", encoding="utf-8-sig", newline="").readline().rstrip("\r\n")
+    if not line:
+        return []
+    delimiter = "\t" if "\t" in line else ","
+    fields = next(csv.reader([line], delimiter=delimiter), [])
+    return [field.strip() for field in fields[1:] if field.strip() and field.strip().lower() not in {"id", "fid", "iid", "line", "sample", "sample_id"}]
+
+
+def _materialize_trait_views(path: Path, traits: list[str]) -> None:
+    if path.suffix.lower() != ".csv" or len(traits) <= 1:
+        return
+    text = path.open("r", encoding="utf-8-sig", newline="")
+    sample = text.readline()
+    delimiter = "\t" if "\t" in sample else ","
+    text.seek(0)
+    reader = csv.DictReader(text, delimiter=delimiter)
+    writers = {}
+    handles = {}
+    try:
+        id_field = reader.fieldnames[0] if reader.fieldnames else "sample_id"
+        for trait in traits:
+            target = path.parent / f"{trait}.csv"
+            handle = target.open("w", encoding="utf-8", newline="")
+            writer = csv.writer(handle)
+            writer.writerow([id_field, trait])
+            handles[trait] = handle
+            writers[trait] = writer
+        for row in reader:
+            for trait in traits:
+                writers[trait].writerow([row.get(id_field, ""), row.get(trait, "")])
+    finally:
+        text.close()
+        for handle in handles.values():
+            handle.close()
 
 
 def _validate_plink_archive(path: Path) -> None:
@@ -412,7 +459,19 @@ def get_dataset(dataset_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, An
     dataset = store.get_dataset(dataset_id, user_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="数据集不存在")
-    return dataset
+    return _public_dataset(dataset)
+
+
+@app.patch("/api/v1/datasets/{dataset_id}/trait")
+def select_dataset_trait(dataset_id: str, trait: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    _require_user(user_id)
+    try:
+        dataset = store.update_dataset_trait(dataset_id, user_id, trait.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    return _public_dataset(dataset)
 
 
 @app.get("/api/v1/datasets/{dataset_id}/inspection")
@@ -497,7 +556,13 @@ async def upload_dataset(
         "phenotype_size": phenotype_meta["size"],
         "genotype_sha256": genotype_meta["sha256"],
         "phenotype_sha256": phenotype_meta["sha256"],
+        "available_traits": _phenotype_traits(phenotype_path),
     }
+    if not dataset["available_traits"] and trait:
+        dataset["available_traits"] = [trait]
+    if trait not in dataset["available_traits"]:
+        raise HTTPException(status_code=400, detail=f"性状 {trait} 不在表型文件中")
+    _materialize_trait_views(phenotype_path, dataset["available_traits"])
     if genotype_is_plink or phenotype_is_pheno:
         dataset["preprocessing_status"] = "pending"
         dataset["input_format"] = "plink_archive"
@@ -513,7 +578,7 @@ async def upload_dataset(
             "active_trait": trait,
             "recent_dataset_ids": recent[:10],
         }, user_id)
-    return dataset
+    return _public_dataset(dataset)
 
 
 @app.post("/api/v1/prediction-genotypes/upload", status_code=201)
@@ -1328,6 +1393,7 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
         trait_matches = [
             item for item in datasets
             if item.get("trait", "").strip().lower() == explicit_trait
+            or explicit_trait in {str(value).strip().lower() for value in _public_dataset(item).get("available_traits", [])}
         ]
         if len(trait_matches) == 1:
             return trait_matches[0]

@@ -65,6 +65,7 @@
           <summary class="context-summary"><div><p class="kicker">DATA CONTEXT</p><h3>当前数据</h3></div><span id="dataset-panel-summary" class="panel-summary">未选择</span></summary>
           <label class="dataset-picker">选择数据集<select id="dataset-select"><option value="">请选择或上传数据</option></select></label>
           <div id="dataset-summary" class="dataset-summary empty">选择数据后将在这里显示物种、性状和规模。</div>
+          <label id="dataset-trait-picker" class="dataset-picker hidden">当前训练性状<select id="dataset-trait-select"></select><small class="field-help">同一数据集可切换不同表型，不需要重复上传基因型。</small></label>
           <details id="dataset-inspection" class="foldout"><summary><span>数据详情与质量</span><button id="refresh-inspection" class="icon-button" type="button" title="重新检查当前数据">刷新检查</button></summary><div id="dataset-inspection-result" class="dataset-summary empty">选择数据集后自动检查，或点击“刷新检查”。</div></details>
           <details id="upload-details" class="foldout"><summary>上传新数据</summary>
             <form id="upload-form">
