@@ -396,6 +396,8 @@ def _public_dataset(dataset: Dict[str, Any]) -> Dict[str, Any]:
         value["available_traits"] = json.loads(value.pop("available_traits_json", "[]") or "[]")
     except (TypeError, json.JSONDecodeError):
         value["available_traits"] = []
+    if _requires_raw_preprocessing(value):
+        value["preprocessing_status"] = "pending"
     return value
 
 
@@ -409,8 +411,11 @@ def _phenotype_traits(path: Path) -> list[str]:
 
 
 def _materialize_trait_views(path: Path, traits: list[str]) -> None:
-    if path.suffix.lower() != ".csv" or len(traits) <= 1:
+    if path.suffix.lower() not in {".csv", ".pheno", ".tsv", ".txt"}:
         return
+    if any(Path(trait).name != trait or any(char in trait for char in "/\\") for trait in traits):
+        raise HTTPException(status_code=400, detail="表型文件包含非法性状名称")
+    view_dir = path.parent.parent if path.parent.name == "source" else path.parent
     text = path.open("r", encoding="utf-8-sig", newline="")
     sample = text.readline()
     delimiter = "\t" if "\t" in sample else ","
@@ -421,7 +426,7 @@ def _materialize_trait_views(path: Path, traits: list[str]) -> None:
     try:
         id_field = reader.fieldnames[0] if reader.fieldnames else "sample_id"
         for trait in traits:
-            target = path.parent / f"{trait}.csv"
+            target = view_dir / f"{trait}.csv"
             handle = target.open("w", encoding="utf-8", newline="")
             writer = csv.writer(handle)
             writer.writerow([id_field, trait])
@@ -529,7 +534,7 @@ async def upload_dataset(
     (dataset_dir / "genotype").mkdir(parents=True, exist_ok=False)
     (dataset_dir / "phenotype").mkdir(parents=True, exist_ok=False)
     genotype_path = (dataset_dir / "genotype" / "genotype.csv") if genotype_is_csv else (dataset_dir / "genotype" / "source" / genotype_name)
-    phenotype_path = (dataset_dir / "phenotype" / f"{trait}.csv") if phenotype_is_csv else (dataset_dir / "phenotype" / "source" / phenotype_name)
+    phenotype_path = dataset_dir / "phenotype" / "source" / phenotype_name
     genotype_path.parent.mkdir(parents=True, exist_ok=True)
     phenotype_path.parent.mkdir(parents=True, exist_ok=True)
     # Dataset uploads are streamed to disk, so allow the raw archive size used by
@@ -540,6 +545,10 @@ async def upload_dataset(
         phenotype_meta = await _save_upload(phenotype, phenotype_path, max_bytes)
         if genotype_is_plink:
             _validate_plink_archive(genotype_path)
+        available_traits = _phenotype_traits(phenotype_path)
+        if not available_traits or trait not in available_traits:
+            raise HTTPException(status_code=400, detail=f"性状 {trait} 不在表型文件中")
+        _materialize_trait_views(phenotype_path, available_traits)
     except Exception:
         shutil.rmtree(dataset_dir, ignore_errors=True)
         raise
@@ -556,13 +565,8 @@ async def upload_dataset(
         "phenotype_size": phenotype_meta["size"],
         "genotype_sha256": genotype_meta["sha256"],
         "phenotype_sha256": phenotype_meta["sha256"],
-        "available_traits": _phenotype_traits(phenotype_path),
+        "available_traits": available_traits,
     }
-    if not dataset["available_traits"] and trait:
-        dataset["available_traits"] = [trait]
-    if trait not in dataset["available_traits"]:
-        raise HTTPException(status_code=400, detail=f"性状 {trait} 不在表型文件中")
-    _materialize_trait_views(phenotype_path, dataset["available_traits"])
     if genotype_is_plink or phenotype_is_pheno:
         dataset["preprocessing_status"] = "pending"
         dataset["input_format"] = "plink_archive"
@@ -838,6 +842,11 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         )
         store.add_message(conversation_id, "assistant", reply)
         return {"type": "needs_input", "conversation_id": conversation_id, "message": reply,
+                "parsed": parsed.to_dict(), "response_source": response_source}
+    if dataset and _requires_raw_preprocessing(dataset) and parsed.intent in {TaskIntent.INSPECT_DATA, TaskIntent.TRAIN_MODEL}:
+        reply = "这份原始 PLINK 数据的表型性状已识别，但基因型仍需预处理，当前不能直接检查或训练。"
+        store.add_message(conversation_id, "assistant", reply)
+        return {"type": "needs_preprocessing", "conversation_id": conversation_id, "message": reply,
                 "parsed": parsed.to_dict(), "response_source": response_source}
     source_run = None
     selected_model = None
