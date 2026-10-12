@@ -105,27 +105,33 @@ function updateRecommendedDatasetName(force = false) {
 async function inferTraitsFromPhenotype() {
   const file = $("phenotype").files[0];
   const target = $("trait-detection");
-  const options = $("upload-trait-options");
-  options.replaceChildren();
+  const select = $("upload-trait");
+  const summary = $("trait-options-summary");
+  select.replaceChildren(new Option("请先选择表型文件", ""));
+  select.disabled = true;
+  summary.textContent = "识别后会在这里列出所有可用性状。";
   if (!file) {
-    target.textContent = "系统将从表型文件列名识别性状，识别后仍可修改。";
+    target.textContent = "系统将从表型文件列名识别性状。";
     return;
   }
   try {
     const header = parseCsvHeader(await file.slice(0, 64 * 1024).text());
-    const traits = header.slice(1).filter((name) => !/^(id|fid|iid|sample|sample_id)$/i.test(name));
-    traits.forEach((trait) => options.appendChild(new Option(trait, trait)));
+    const traits = header.slice(1).filter((name) => !/^(id|fid|iid|line|sample|sample_id)$/i.test(name));
     if (!traits.length) {
-      target.textContent = "未从表型文件识别到性状列，请手动填写。";
+      select.replaceChildren(new Option("未识别到性状", ""));
+      target.textContent = "未从表型文件识别到性状列，请检查表头。";
       return;
     }
-    $("upload-trait").value = traits[0];
+    select.replaceChildren(new Option(`请选择性状（共 ${traits.length} 个）`, ""), ...traits.map((trait) => new Option(trait, trait)));
+    select.disabled = false;
+    select.value = "";
+    summary.textContent = `可选性状：${traits.join("、")}`;
     target.textContent = traits.length === 1
-      ? `已识别性状：${traits[0]}，可以手动修改。`
-      : `已识别 ${traits.length} 个性状，可从输入框候选项中选择。`;
+      ? `已识别 1 个性状，请确认选择 ${traits[0]}。`
+      : `已识别 ${traits.length} 个性状，请在下方明确选择本次使用的性状。`;
     updateRecommendedDatasetName();
   } catch (error) {
-    target.textContent = `读取表型列名失败：${error.message}，请手动填写。`;
+    target.textContent = `读取表型列名失败：${error.message}，请检查文件格式。`;
   }
 }
 
@@ -1085,7 +1091,7 @@ $("phenotype").addEventListener("change", () => {
 ["train-device", "train-epochs", "train-split", "train-mode"].forEach((id) => $(id)?.addEventListener("input", updateTrainingSummary));
 updateTrainingSummary();
 $("upload-species").addEventListener("input", () => updateRecommendedDatasetName());
-$("upload-trait").addEventListener("input", () => updateRecommendedDatasetName());
+$("upload-trait").addEventListener("change", () => updateRecommendedDatasetName(true));
 $("upload-dataset-name").addEventListener("input", () => { datasetNameEdited = true; });
 
 $("upload-form").addEventListener("submit", async (event) => {

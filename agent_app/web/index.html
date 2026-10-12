@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MENET Agent</title>
-  <link rel="stylesheet" href="/app/style.css?v=20260930-1">
+  <link rel="stylesheet" href="/app/style.css?v=20261012-1">
 </head>
 <body>
   <header class="topbar">
@@ -72,7 +72,7 @@
               <label>基因型文件<input id="genotype" type="file" accept=".csv,.tar.gz" required><small id="genotype-file-meta" class="field-help">支持 CSV 或 PLINK .bed.tar.gz，默认上传上限 2 GiB。</small></label>
               <label>表型文件<input id="phenotype" type="file" accept=".csv,.pheno,.tsv,.txt" required><small id="phenotype-file-meta" class="field-help">支持 CSV、.pheno、TSV、TXT；原始文件会保留。</small><small id="trait-detection" class="field-help">系统将从表型文件列名识别性状，识别后仍可修改。</small></label>
               <label>物种<select id="upload-species" required><option value="">请选择物种</option><option>Oryza sativa (rice)</option><option>Triticum aestivum (wheat)</option><option>Zea mays (maize)</option><option>Glycine max (soybean)</option><option>Hordeum vulgare (barley)</option><option>Sorghum bicolor (sorghum)</option><option>Brassica napus (rapeseed)</option><option>Gossypium hirsutum (cotton)</option><option>Solanum lycopersicum (tomato)</option><option>Arabidopsis thaliana</option><option value="__custom__">其他物种</option></select><input id="upload-species-custom" class="hidden" placeholder="输入物种名称"></label>
-              <label>性状名称<input id="upload-trait" name="trait" list="upload-trait-options" placeholder="选择表型文件后自动识别" required><datalist id="upload-trait-options"></datalist></label>
+              <label>选择本次使用的性状<select id="upload-trait" name="trait" required disabled><option value="">请先选择表型文件</option></select><small id="trait-options-summary" class="field-help">识别后会在这里列出所有可用性状。</small></label>
               <label>数据集名称<input id="upload-dataset-name" placeholder="选择物种和表型文件后自动推荐" required><small class="field-help">系统会生成“物种_性状_日期”，也可以自行修改。</small></label>
               <button id="upload-submit" class="button secondary" type="submit">上传并设为当前数据 <span>-></span></button>
               <div id="upload-progress" class="upload-progress hidden"><div class="progress"><span></span></div><small>等待上传</small></div>
@@ -111,6 +111,6 @@
   <dialog id="task-confirm" class="confirm-dialog"><h3>确认开始长任务</h3><p id="confirm-summary"></p><p class="field-help">任务会在后台执行，可以离开页面后再从历史会话中查看。</p><div class="dialog-actions"><button id="cancel-run" class="button secondary" type="button">返回修改</button><button id="confirm-run" class="button primary" type="button">开始运行</button></div></dialog>
   <dialog id="auth-dialog" class="auth-dialog"><form id="auth-form" method="dialog"><div class="auth-dialog-heading"><div><p class="kicker">ACCOUNT</p><h2 id="auth-title">登录 MENET Agent</h2></div><button id="auth-close" class="icon-button" type="button" aria-label="关闭">×</button></div><label>用户名<input id="auth-username" name="username" autocomplete="username" required></label><label>密码<input id="auth-password" name="password" type="password" minlength="8" autocomplete="current-password" required></label><p class="field-help">账号由管理员创建，请使用管理员分配的用户名和密码。</p><p id="auth-error" class="inline-result error hidden"></p><div class="auth-dialog-actions"><span></span><button class="primary-button" type="submit">登录</button></div></form></dialog>
   <dialog id="user-dialog" class="user-dialog"><div class="auth-dialog-heading"><div><p class="kicker">ADMINISTRATION</p><h2>用户管理</h2></div><button id="user-dialog-close" class="icon-button" type="button" aria-label="关闭">×</button></div><div id="user-list" class="user-list"></div><form id="user-form" class="user-form"><h3>新增用户</h3><div class="user-form-grid"><label>用户名<input id="new-username" required autocomplete="off"></label><label>显示名称<input id="new-display-name" required></label><label>初始密码<input id="new-password" type="password" minlength="8" required autocomplete="new-password"></label><label>角色<select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label></div><p id="user-form-error" class="inline-result error hidden"></p><div class="dialog-actions"><button class="primary-button" type="submit">创建用户</button></div></form></dialog>
-  <script src="/app/app.js?v=20260930-1"></script>
+  <script src="/app/app.js?v=20261012-1"></script>
 </body>
 </html>
