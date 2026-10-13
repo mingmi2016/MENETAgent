@@ -7,6 +7,8 @@ let predictionGenotypePath = "";
 let selectedModelId = "";
 let activeTrait = "";
 let datasetNameEdited = false;
+let suppressNextChatUserMessage = false;
+let suppressNextChatConfirmation = false;
 const taskPollers = new Map();
 const DATASET_UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 const taskNodes = new Map();
@@ -88,18 +90,18 @@ function syncCustomSpeciesField() {
 
 function recommendedDatasetName() {
   const species = getSpeciesValue();
-  const trait = $("upload-trait").value.trim();
-  if (!species || !trait) return "";
+  const genotype = $("genotype").files[0];
+  if (!species || !genotype) return "";
+  const source = genotype.name.replace(/(?:\.bed\.tar\.gz|\.csv)$/i, "").trim();
+  if (!source) return "";
   const date = new Date().toLocaleDateString("sv-SE");
-  return `${species}_${trait}_${date}`;
+  return `${species.replace(/\s*\([^)]*\)\s*$/, "").trim().replace(/\s+/g, "_")}_${source}_${date}`;
 }
 
-function updateRecommendedDatasetName(force = false) {
+function updateRecommendedDatasetName() {
+  if (datasetNameEdited) return;
   const recommendation = recommendedDatasetName();
-  if (recommendation && (force || !datasetNameEdited || !$("upload-dataset-name").value.trim())) {
-    $("upload-dataset-name").value = recommendation;
-    datasetNameEdited = false;
-  }
+  $("upload-dataset-name").value = recommendation;
 }
 
 async function inferTraitsFromPhenotype() {
@@ -184,8 +186,8 @@ function trainingPrompt() {
   return `请训练模型，性状为 ${trait}，${deviceText}，训练 ${epochs} 轮${splitText}`;
 }
 
-function setUploadProgress(percent, message) {
-  const box = $("upload-progress");
+function setUploadProgress(percent, message, progressId = "upload-progress") {
+  const box = $(progressId);
   const bar = box?.querySelector(".progress span");
   const label = box?.querySelector("small");
   if (!box || !bar || !label) return;
@@ -194,16 +196,16 @@ function setUploadProgress(percent, message) {
   label.textContent = message;
 }
 
-function uploadRequest(url, form) {
+function uploadRequest(url, form, progressId = "upload-progress") {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
     xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
-        setUploadProgress((event.loaded / event.total) * 100, `正在上传 ${formatFileSize(event.loaded)} / ${formatFileSize(event.total)}`);
+        setUploadProgress((event.loaded / event.total) * 100, `正在上传 ${formatFileSize(event.loaded)} / ${formatFileSize(event.total)}`, progressId);
       } else {
-        setUploadProgress(8, "正在上传，服务器未返回总大小");
+        setUploadProgress(8, "正在上传，服务器未返回总大小", progressId);
       }
     };
     xhr.onload = () => {
@@ -213,7 +215,7 @@ function uploadRequest(url, form) {
     };
     xhr.onerror = () => reject(new Error("上传连接失败"));
     xhr.onabort = () => reject(new Error("上传已取消"));
-    setUploadProgress(1, "准备上传");
+    setUploadProgress(1, "准备上传", progressId);
     xhr.send(form);
   });
 }
@@ -608,6 +610,7 @@ async function loadDatasets(selectedId = "") {
     option.dataset.directory = dataset.dataset_dir;
     option.dataset.trait = dataset.trait;
     option.dataset.traits = JSON.stringify(dataset.available_traits || (dataset.trait ? [dataset.trait] : []));
+    option.dataset.preprocessing = dataset.preprocessing_status || "";
     option.dataset.name = dataset.name;
     option.dataset.species = dataset.species;
     option.dataset.samples = dataset.sample_count || "";
@@ -699,7 +702,9 @@ async function loadModels(preferredId = "") {
 
 function applySelectedDataset() {
   const option = $("dataset-select").selectedOptions[0];
+  $("delete-dataset").disabled = !option?.value || option.dataset.demo === "1";
   if (!option?.value) {
+    $("preprocessing-panel").classList.add("hidden");
     $("dataset-summary").textContent = "选择数据后将在这里显示物种、性状和规模。";
     $("dataset-summary").classList.add("empty");
     $("dataset-panel-summary").textContent = "未选择";
@@ -711,6 +716,9 @@ function applySelectedDataset() {
     return;
   }
   activeTrait = option.dataset.trait;
+  const preprocessing = option.dataset.preprocessing;
+  $("preprocessing-panel").classList.toggle("hidden", !preprocessing);
+  if (preprocessing) refreshPreprocessingStatus(option.value);
   const traits = JSON.parse(option.dataset.traits || "[]");
   const traitPicker = $("dataset-trait-picker");
   const traitSelect = $("dataset-trait-select");
@@ -732,6 +740,56 @@ function applySelectedDataset() {
   $("dataset-inspection-result").classList.add("empty");
 }
 
+$("delete-dataset").addEventListener("click", async () => {
+  const select = $("dataset-select");
+  const option = select.selectedOptions[0];
+  if (!option?.value || option.dataset.demo === "1") return;
+  const name = option.dataset.name || option.textContent;
+  if (!window.confirm(`删除“${name}”的数据集登记？\n\n只删除数据库中的登记记录，不删除服务器文件、历史任务和模型。`)) return;
+  try {
+    await request(`/api/v1/datasets/${encodeURIComponent(option.value)}?${userQuery()}`, { method: "DELETE" });
+    select.value = "";
+    await loadDatasets();
+    await loadModels();
+    notice("数据集登记已删除。服务器文件、历史任务和模型仍然保留。");
+  } catch (error) { notice(error.message, true); }
+});
+
+async function refreshPreprocessingStatus(datasetId) {
+  if ($("dataset-select").value !== datasetId) return;
+  try {
+    const state = await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preprocessing?${userQuery()}`);
+    if ($("dataset-select").value !== datasetId) return;
+    const labels = {
+      pending: "原始 PLINK 数据等待预处理。",
+      queued: `预处理已提交到 CPU 队列（任务 ${state.job_id || ""}）。`,
+      running: `正在预处理：${{starting: "启动", extracting: "解压", filtering: "筛选标记", writing: "生成训练文件"}[state.phase] || "处理中"}。`,
+      failed: `预处理失败：${state.error || "请查看任务日志"}`,
+      completed: `预处理完成：从 ${state.report?.source_markers || "?"} 个原始标记中按全范围抽取并筛选 ${state.report?.retained_markers || "?"} 个标记，可检查和训练。训练结果基于该标记子集。`,
+    };
+    $("preprocessing-summary").textContent = labels[state.status] || "预处理状态未知。";
+    $("start-preprocessing").classList.toggle("hidden", state.status !== "pending" && state.status !== "failed");
+    if (state.status === "completed" && $("dataset-select").selectedOptions[0]?.dataset.preprocessing !== "completed") {
+      $("dataset-select").selectedOptions[0].dataset.preprocessing = "completed";
+      await loadDatasets(datasetId);
+    }
+    if (["queued", "running"].includes(state.status)) setTimeout(() => refreshPreprocessingStatus(datasetId), 10000);
+  } catch (error) {
+    $("preprocessing-summary").textContent = `无法获取预处理状态：${error.message}`;
+  }
+}
+
+$("start-preprocessing").addEventListener("click", async () => {
+  const datasetId = $("dataset-select").value;
+  if (!datasetId) return;
+  $("start-preprocessing").disabled = true;
+  try {
+    await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preprocessing?${userQuery()}`, { method: "POST" });
+    await refreshPreprocessingStatus(datasetId);
+  } catch (error) { notice(error.message, true); }
+  finally { $("start-preprocessing").disabled = false; }
+});
+
 async function loadDatasetInspection() {
   const datasetId = $("dataset-select").value;
   const target = $("dataset-inspection-result");
@@ -745,6 +803,11 @@ async function loadDatasetInspection() {
     const response = await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/inspection?${userQuery()}`);
     const result = response.inspection;
     const data = result.data || {};
+    if (result.status === "pending") {
+      target.textContent = (result.messages || ["预处理尚未完成"]).join("；");
+      target.classList.add("empty");
+      return;
+    }
     const lines = [
       `${result.success ? "可用于 MENET" : "暂不可用于 MENET"} · 匹配 ${data.matched_sample_count ?? "?"} 个样本 · ${data.snp_count ?? "?"} 个 SNP`,
       `基因型缺失 ${data.genotype_missing_count ?? "?"}（${((data.genotype_missing_rate || 0) * 100).toFixed(2)}%） · 重复材料 ${data.duplicate_genotype_sample_count ?? "?"}`,
@@ -946,13 +1009,19 @@ $("prediction-form").addEventListener("submit", async (event) => {
     const form = new FormData();
     form.append("file", file);
     const query = new URLSearchParams({ user_id: currentUserId, dataset_id: datasetId, conversation_id: conversationId });
-    const data = await request(`/api/v1/prediction-genotypes/upload?${query}`, { method: "POST", body: form });
+    $("prediction-submit").disabled = true;
+    setUploadProgress(1, "准备上传", "prediction-progress");
+    const data = await uploadRequest(`/api/v1/prediction-genotypes/upload?${query}`, form, "prediction-progress");
     predictionGenotypePath = data.path;
+    setUploadProgress(100, "服务器已归档，预测文件准备完成", "prediction-progress");
     $("prediction-result").textContent = `已设置：${data.filename}（已归档到当前数据集）`;
     $("prediction-result").classList.remove("hidden");
     notice("新基因型文件已设置，点击“预测性状”后发送即可。", false);
   } catch (error) {
     notice(error.message, true);
+    setUploadProgress(100, `上传失败：${error.message}`, "prediction-progress");
+  } finally {
+    $("prediction-submit").disabled = false;
   }
 });
 
@@ -1083,7 +1152,10 @@ $("archive-model").addEventListener("click", async () => {
   } catch (error) { notice(error.message, true); }
 });
 
-$("genotype").addEventListener("change", () => updateUploadFileMeta("genotype", "genotype-file-meta", "genotype"));
+$("genotype").addEventListener("change", () => {
+  updateUploadFileMeta("genotype", "genotype-file-meta", "genotype");
+  updateRecommendedDatasetName();
+});
 $("phenotype").addEventListener("change", () => {
   updateUploadFileMeta("phenotype", "phenotype-file-meta", "phenotype");
   inferTraitsFromPhenotype();
@@ -1091,7 +1163,6 @@ $("phenotype").addEventListener("change", () => {
 ["train-device", "train-epochs", "train-split", "train-mode"].forEach((id) => $(id)?.addEventListener("input", updateTrainingSummary));
 updateTrainingSummary();
 $("upload-species").addEventListener("input", () => updateRecommendedDatasetName());
-$("upload-trait").addEventListener("change", () => updateRecommendedDatasetName(true));
 $("upload-dataset-name").addEventListener("input", () => { datasetNameEdited = true; });
 
 $("upload-form").addEventListener("submit", async (event) => {
@@ -1118,13 +1189,13 @@ $("upload-form").addEventListener("submit", async (event) => {
     const data = await uploadRequest(`/api/v1/datasets/upload?${query}`, form);
     $("dataset-dir").value = data.dataset_dir;
     $("dataset-result").textContent = data.preprocessing_status === "pending"
-      ? "原始数据已上传，等待预处理：" + data.name
+      ? "原始数据已上传，请在当前数据面板点击“开始预处理”：" + data.name
       : "数据已登记：" + data.name;
     $("dataset-result").classList.remove("hidden");
     await loadDatasets(data.dataset_id);
     setUploadProgress(100, "上传完成，数据集已登记");
     notice(data.preprocessing_status === "pending"
-      ? "原始文件上传完成，已登记，等待 PLINK 预处理后才能检查和训练。"
+      ? "原始文件上传完成，请点击“开始预处理”。完成后可检查数据并训练。"
       : "数据上传完成，并已设为当前数据。");
   } catch (error) {
     notice(error.message, true);
@@ -1146,6 +1217,10 @@ document.querySelectorAll("[data-action='train']").forEach((button) => button.ad
 }));
 
 function confirmLongTask(text) {
+  if (suppressNextChatConfirmation) {
+    suppressNextChatConfirmation = false;
+    return Promise.resolve(true);
+  }
   if (!/(训练|报告|train|report)/i.test(text)) return Promise.resolve(true);
   const selected = $("dataset-select").selectedOptions[0];
   $("confirm-summary").textContent = `${selected?.textContent || "当前数据"}；性状 ${activeTrait || "未指定"}。`;
@@ -1180,7 +1255,8 @@ $("chat-form").addEventListener("submit", async (event) => {
     return;
   }
   if (!(await confirmLongTask(text))) return;
-  addMessage(text, "user");
+  if (!suppressNextChatUserMessage) addMessage(text, "user");
+  suppressNextChatUserMessage = false;
   $("message").value = "";
   try {
     const data = await request("/api/v1/chat", {
@@ -1209,8 +1285,32 @@ $("chat-form").addEventListener("submit", async (event) => {
         $("model-panel").open = true;
         await loadModels(selectedModelId);
       }
+    } else if (data.type === "preprocessing" || data.type === "needs_preprocessing") {
+      addMessage(data.message, "agent", true, data.response_source);
+      if (data.type === "preprocessing" && data.preprocessing?.status !== "failed") {
+        const datasetId = $("dataset-select").value;
+        const continueWhenReady = async () => {
+          try {
+            const state = await request(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preprocessing?${userQuery()}`);
+            if (state.status === "completed") {
+              suppressNextChatUserMessage = true;
+              suppressNextChatConfirmation = true;
+              $("message").value = text;
+              $("chat-form").requestSubmit();
+            } else if (state.status === "failed") {
+              addMessage(`数据准备失败：${state.error || "请查看预处理日志"}`, "agent", true, data.response_source);
+            } else {
+              setTimeout(continueWhenReady, 10000);
+            }
+          } catch (error) {
+            addMessage(`无法获取数据准备状态：${error.message}`, "agent");
+          }
+        };
+        setTimeout(continueWhenReady, 3000);
+      }
     } else {
-      addMessage(`任务参数无效：${(data.errors || []).join("；")}`, "agent", true, data.response_source);
+      const detail = (data.errors || []).join("；");
+      addMessage(detail ? `任务参数无效：${detail}` : (data.message || "请求无法提交，请检查当前数据和性状。"), "agent", true, data.response_source);
     }
   } catch (error) {
     addMessage(`请求没有成功：${error.message}`, "agent");

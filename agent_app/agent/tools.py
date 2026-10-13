@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,12 @@ CORE_ROOT = Path(
         Path(__file__).resolve().parents[2] / "MENET",
     )
 ).resolve()
+
+# The legacy MENET modules use top-level imports such as ``network`` and
+# ``utils``. Add the configured core checkout explicitly so prediction and
+# inspection work from the Web process as well as from an LSF worker.
+if str(CORE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CORE_ROOT))
 
 
 class MenetTools:
@@ -74,8 +81,10 @@ class MenetTools:
         genotype_missing = int(genotype_numeric.isna().sum().sum())
         phenotype_missing = int(phenotype_numeric.isna().sum())
         if phenotype_missing:
-            errors.append(f"表型目标列包含 {phenotype_missing} 个非数值或缺失值")
-        elif phenotype_numeric.nunique(dropna=True) <= 1:
+            warnings.append(f"表型目标列有 {phenotype_missing} 个非数值或缺失值，训练时将跳过这些样本")
+        if len(common_ids.intersection(phenotype_numeric.dropna().index)) < 3:
+            errors.append("匹配且有数值表型的样本少于 3 个")
+        elif phenotype_numeric.dropna().nunique() <= 1:
             errors.append("表型目标列没有变异，无法训练预测模型")
         if genotype_missing:
             warnings.append(f"基因型包含 {genotype_missing} 个非数值或缺失值")
@@ -136,7 +145,8 @@ class MenetTools:
         if not phenotype_path.is_file():
             return self._result(False, "failed", [f"缺少表型文件: {phenotype_path}"], [])
         phenotype = pd.read_csv(phenotype_path, index_col=0, comment="*")
-        ids = phenotype.index.astype(str).tolist()
+        numeric_trait = pd.to_numeric(phenotype.iloc[:, 0], errors="coerce")
+        ids = phenotype.index[numeric_trait.notna()].astype(str).tolist()
         if len(ids) < 3:
             return self._result(False, "failed", ["自动划分至少需要 3 个样本"], [])
 

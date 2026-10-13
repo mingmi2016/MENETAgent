@@ -482,6 +482,15 @@ class TaskStore:
             connection.execute("UPDATE datasets SET trait=? WHERE dataset_id=? AND user_id=?", (trait, dataset_id, user_id))
         return self.get_dataset(dataset_id, user_id)
 
+    def delete_dataset_record(self, dataset_id: str, user_id: str) -> bool:
+        """Remove only a user's dataset registration; files and history stay intact."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM datasets WHERE dataset_id=? AND user_id=? AND is_demo=0",
+                (dataset_id, user_id),
+            )
+        return cursor.rowcount > 0
+
     def list_datasets(self, user_id: str = DEFAULT_USER_ID, limit: int = 50) -> list:
         with self._connect() as connection:
             rows = connection.execute(

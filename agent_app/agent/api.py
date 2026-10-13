@@ -8,6 +8,8 @@ import shutil
 import statistics
 import tarfile
 import csv
+import shlex
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -386,8 +388,24 @@ def list_datasets(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
 
 def _requires_raw_preprocessing(dataset: Dict[str, Any]) -> bool:
     genotype_name = str(dataset.get("genotype_filename", "")).lower()
-    phenotype_name = str(dataset.get("phenotype_filename", "")).lower()
-    return genotype_name.endswith((".bed.tar.gz", ".tar.gz")) or Path(phenotype_name).suffix in {".pheno", ".tsv", ".txt"}
+    return genotype_name.endswith((".bed.tar.gz", ".tar.gz")) and _preprocessing_state(dataset)["status"] != "completed"
+
+
+def _preprocessing_output(dataset: Dict[str, Any]) -> Path:
+    return Path(dataset["dataset_dir"]) / "genotype" / "genotype.csv"
+
+
+def _preprocessing_state(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    status_path = Path(dataset["dataset_dir"]) / "genotype" / "preprocessing_status.json"
+    try:
+        state = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {"status": "pending"}
+    if state.get("status") != "failed" and _preprocessing_output(dataset).is_file() and (Path(dataset["dataset_dir"]) / "genotype" / "preprocessing_report.json").is_file():
+        state["status"] = "completed"
+    elif state.get("status") == "completed":
+        state = {"status": "pending"}
+    return state
 
 
 def _public_dataset(dataset: Dict[str, Any]) -> Dict[str, Any]:
@@ -396,9 +414,59 @@ def _public_dataset(dataset: Dict[str, Any]) -> Dict[str, Any]:
         value["available_traits"] = json.loads(value.pop("available_traits_json", "[]") or "[]")
     except (TypeError, json.JSONDecodeError):
         value["available_traits"] = []
-    if _requires_raw_preprocessing(value):
-        value["preprocessing_status"] = "pending"
+    if str(value.get("genotype_filename", "")).lower().endswith((".bed.tar.gz", ".tar.gz")):
+        value["preprocessing_status"] = _preprocessing_state(value)["status"]
     return value
+
+
+@app.get("/api/v1/datasets/{dataset_id}/preprocessing")
+def get_dataset_preprocessing(dataset_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    dataset = store.get_dataset(dataset_id, user_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    return _preprocessing_state(dataset)
+
+
+@app.post("/api/v1/datasets/{dataset_id}/preprocessing", status_code=202)
+def start_dataset_preprocessing(dataset_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    _require_user(user_id)
+    dataset = store.get_dataset(dataset_id, user_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    if not str(dataset.get("genotype_filename", "")).lower().endswith((".bed.tar.gz", ".tar.gz")):
+        raise HTTPException(status_code=400, detail="此数据集不是 PLINK 压缩包")
+    state = _preprocessing_state(dataset)
+    if state["status"] in {"queued", "running", "completed"}:
+        return state
+    return _queue_dataset_preprocessing(dataset)
+
+
+def _queue_dataset_preprocessing(dataset: Dict[str, Any]) -> Dict[str, Any]:
+    dataset_dir = Path(dataset["dataset_dir"]).resolve()
+    status_path = dataset_dir / "genotype" / "preprocessing_status.json"
+    python = os.environ.get("MENET_PYTHON", os.sys.executable)
+    worker = service_root / "scripts" / "preprocess_plink.py"
+    command = " ".join(shlex.quote(value) for value in (python, str(worker), str(dataset_dir)))
+    stdout = dataset_dir / "genotype" / "preprocessing.stdout"
+    stderr = dataset_dir / "genotype" / "preprocessing.stderr"
+    job_name = "menet_preprocess_" + str(dataset.get("dataset_id", "dataset"))
+    result = subprocess.run(
+        ["bsub", "-q", os.environ.get("MENET_PREPROCESS_QUEUE", "cpu"),
+         "-W", os.environ.get("MENET_PREPROCESS_WALLTIME", "24:00"),
+         "-J", job_name, "-oo", str(stdout), "-eo", str(stderr), command],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise HTTPException(status_code=503, detail=f"预处理任务提交失败：{(result.stderr or result.stdout).strip()}")
+    match = re.search(r"Job\s+<(\d+)>\s+is submitted", result.stdout)
+    if not match:
+        raise HTTPException(status_code=503, detail=f"无法识别 LSF 任务编号：{result.stdout.strip()}")
+    current = _preprocessing_state(dataset)
+    if current["status"] in {"queued", "running", "completed"}:
+        return current
+    state = {"status": "queued", "job_id": match.group(1), "submitted_at": datetime.now(timezone.utc).isoformat()}
+    status_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    return state
 
 
 def _phenotype_traits(path: Path) -> list[str]:
@@ -477,6 +545,23 @@ def select_dataset_trait(dataset_id: str, trait: str, user_id: str = DEFAULT_USE
     if dataset is None:
         raise HTTPException(status_code=404, detail="数据集不存在")
     return _public_dataset(dataset)
+
+
+@app.delete("/api/v1/datasets/{dataset_id}")
+def delete_dataset_record(dataset_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    _require_user(user_id)
+    dataset = store.get_dataset(dataset_id, user_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    if dataset.get("is_demo"):
+        raise HTTPException(status_code=400, detail="示例数据集不能删除")
+    if not store.delete_dataset_record(dataset_id, user_id):
+        raise HTTPException(status_code=404, detail="数据集不存在或无权删除")
+    return {
+        "dataset_id": dataset_id,
+        "status": "deleted",
+        "message": "数据集登记已删除；服务器文件、历史任务和模型均已保留。",
+    }
 
 
 @app.get("/api/v1/datasets/{dataset_id}/inspection")
@@ -843,11 +928,23 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         store.add_message(conversation_id, "assistant", reply)
         return {"type": "needs_input", "conversation_id": conversation_id, "message": reply,
                 "parsed": parsed.to_dict(), "response_source": response_source}
-    if dataset and _requires_raw_preprocessing(dataset) and parsed.intent in {TaskIntent.INSPECT_DATA, TaskIntent.TRAIN_MODEL}:
-        reply = "这份原始 PLINK 数据的表型性状已识别，但基因型仍需预处理，当前不能直接检查或训练。"
+    if dataset and _requires_raw_preprocessing(dataset) and parsed.intent in {
+        TaskIntent.INSPECT_DATA, TaskIntent.TRAIN_MODEL, TaskIntent.PREDICT_TRAIT,
+        TaskIntent.EVALUATE_MODEL, TaskIntent.EXPLAIN_MODEL,
+    }:
+        preprocessing = _queue_dataset_preprocessing(dataset)
+        reply = "已自动提交数据准备任务。完成后将继续执行：" + {
+            TaskIntent.INSPECT_DATA: "数据检查",
+            TaskIntent.TRAIN_MODEL: "模型训练",
+            TaskIntent.PREDICT_TRAIT: "性状预测",
+            TaskIntent.EVALUATE_MODEL: "模型评估",
+            TaskIntent.EXPLAIN_MODEL: "模型解释",
+        }[parsed.intent]
+        if preprocessing.get("status") == "failed":
+            reply = "数据准备失败：" + preprocessing.get("error", "请查看预处理日志")
         store.add_message(conversation_id, "assistant", reply)
-        return {"type": "needs_preprocessing", "conversation_id": conversation_id, "message": reply,
-                "parsed": parsed.to_dict(), "response_source": response_source}
+        return {"type": "preprocessing", "conversation_id": conversation_id, "message": reply,
+                "preprocessing": preprocessing, "parsed": parsed.to_dict(), "response_source": response_source}
     source_run = None
     selected_model = None
     if parsed.intent in {TaskIntent.PREDICT_TRAIT, TaskIntent.EVALUATE_MODEL, TaskIntent.EXPLAIN_MODEL}:
