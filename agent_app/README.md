@@ -111,6 +111,10 @@ MENET_LSF_PYTHON=/data/user_home/xtcgroup/huawei/envs/torch_gpu/bin/python
 MENET_LSF_QUEUE=gpu
 MENET_LSF_HOST=gpu01
 MENET_LSF_WALLTIME=24:00
+MENET_LSF_PREDICT_QUEUE=cpu
+MENET_LSF_PREDICT_HOST=
+MENET_LSF_PREDICT_WALLTIME=01:00
+MENET_LSF_PREDICT_CPUS=4
 ```
 
 The backend settings are backward-compatible:
@@ -119,7 +123,7 @@ The backend settings are backward-compatible:
 - `MENET_QUEUE_BACKEND=celery` keeps the existing Redis/Celery path.
 - `MENET_QUEUE_BACKEND=lsf` submits `bsub -q gpu -m gpu01 -gpu "num=1"` jobs and uses `bjobs`/`bkill` for status and cancellation.
 
-The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time. With `MENET_QUEUE_BACKEND=lsf`, only `train_model` is submitted to LSF on `gpu01`. Data inspection, model listing, prediction, evaluation, and explanation run in the login-node Web process. The login environment therefore needs CPU PyTorch for ordinary prediction, while the `torch_gpu` environment is reserved for training. The local workstation and cluster use the same code with different `.env` files.
+The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time. With `MENET_QUEUE_BACKEND=lsf`, training is submitted to the GPU queue on `gpu01`, while prediction defaults to the CPU queue without a GPU request. Data inspection, model listing, evaluation, and explanation run in the login-node Web process. LSF workers write only progress, artifacts and `result.json`; the login service imports results and performs all database updates and model registration. The local workstation and cluster use the same code with different `.env` files.
 Start the Web service from the login node:
 
 ```bash
@@ -136,7 +140,7 @@ The current deployment is functional, but the following work should be completed
 
 1. Enable and verify authentication. Set `MENET_AUTH_MODE=required` on the server, create an administrator account, and verify that users cannot read or modify another user's tasks, datasets, models, or artifacts. For HTTPS, also set `MENET_COOKIE_SECURE=1`.
 2. Reconcile LSF state after service restarts. On startup, inspect `.lsf_job_id` with `bjobs` instead of immediately marking an active task as failed. Keep `PEND` and `RUN` tasks alive, import `result.json` for `DONE`, and mark `EXIT` or `ZOMBI` jobs as failed.
-3. Add an end-to-end LSF smoke test covering submission, `PEND`/`RUN` status, GPU completion, result loading, model registration, cancellation, and the rule that only `train_model` uses LSF.
+3. Add an end-to-end LSF smoke test covering submission, `PEND`/`RUN` status, GPU training, CPU prediction, result loading, model registration, cancellation, and login-only database writes.
 4. Harden LSF submission and logging. Prefer a fixed worker script with `task.json` arguments over shell command construction, and record command failures, timeouts, `bsub`, `bjobs`, and `bkill` output.
 5. Serialize repeated validation runs or enforce a concurrency limit so repeated GPU training does not exhaust the allocated GPU memory.
 6. Run the Web service under a restart policy with log rotation and health checks instead of relying only on `nohup`.

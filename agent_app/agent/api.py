@@ -40,8 +40,9 @@ from .tools import MenetTools
 
 LSF_TASK_INTENTS = {
     TaskIntent.TRAIN_MODEL,
+    TaskIntent.PREDICT_TRAIT,
 }
-LSF_TERMINAL_STATUSES = {"DONE", "EXIT", "ZOMBI"}
+LSF_TERMINAL_STATUSES = {"DONE", "EXIT", "ZOMBI", "NOT_FOUND"}
 
 
 class TaskRequest(BaseModel):
@@ -881,6 +882,9 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
     store.add_message(conversation_id, "user", request.message)
     model_query = parsed.intent == TaskIntent.LIST_MODELS
     if model_query:
+        _sync_pending_lsf_tasks()
+        # Repair completed training assets before presenting the model list.
+        store.backfill_models()
         query_trait = IntentParser._extract_trait(request.message) or (dataset or {}).get("trait")
         target_dataset_id = (dataset or {}).get("dataset_id")
         target_dataset_dir = str(Path((dataset or {}).get("dataset_dir", "")).resolve()) if dataset else ""
@@ -1235,6 +1239,39 @@ def _submit_task(task: MenetTask) -> None:
     executor.submit(run_task, task.to_dict(), str(store.path))
 
 
+def _sync_lsf_task(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    task = record["task"]
+    output_dir = Path(task.get("output_dir", ""))
+    result_path = output_dir / "result.json"
+    status_path = output_dir / "worker_status.json"
+    if status_path.is_file():
+        try:
+            store.import_worker_status(record["task_id"], json.loads(status_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            pass
+    if result_path.is_file():
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if result.get("status") in {"completed", "failed", "cancelled"}:
+                return store.finalize_task(task, result) and store.get(record["task_id"], record["user_id"])
+        except (OSError, ValueError, TypeError):
+            pass
+    return store.get(record["task_id"], record["user_id"])
+
+
+def _sync_pending_lsf_tasks() -> None:
+    """Import compute-node result files before serving task/model queries."""
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() != "lsf":
+        return
+    lsf = LSFExecutor(service_root, str(store.path))
+    for record in store.pending_lsf_tasks():
+        job_id = lsf.job_id(record["task"].get("output_dir", ""))
+        if job_id:
+            _sync_lsf_terminal_state(record, lsf.status(job_id) or "RUN")
+        else:
+            _sync_lsf_task(record)
+
+
 def _validate_paths(dataset_dir: str, output_dir: str) -> None:
     for label, value in (("dataset_dir", dataset_dir), ("output_dir", output_dir)):
         resolved = (service_root / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
@@ -1334,23 +1371,30 @@ def _load_lsf_result(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[s
                 pass
         return result
     if lsf_status in {"EXIT", "ZOMBI"}:
-        return {
+        result = {
             "task_id": record["task_id"],
             "status": "failed",
             "errors": ["LSF 作业已结束但未写入结果，请查看 lsf.stderr。"],
             "warnings": [],
         }
+        store.finalize_task(record["task"], result)
+        return store.get(record["task_id"], record["user_id"])
     return None
 
 
 def _sync_lsf_terminal_state(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[str, Any]]:
-    if record["status"] in {"completed", "failed", "cancelled"}:
-        return record
+    refreshed = _sync_lsf_task(record)
+    if refreshed and refreshed["status"] in {"completed", "failed", "cancelled"}:
+        return refreshed
+    if refreshed and lsf_status in {"PEND", "RUN", "SSUSP", "USUSP"}:
+        return refreshed
     result = _load_lsf_result(record, lsf_status)
     if result is None:
         return None
-    store.update(record["task_id"], result.get("status", "completed"), result)
-    return store.get(record["task_id"], record["user_id"])
+    if result.get("status") in {"completed", "failed", "cancelled"}:
+        store.finalize_task(record["task"], result)
+        return store.get(record["task_id"], record["user_id"])
+    return record
 
 
 def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -19,6 +20,15 @@ class LSFExecutor:
         self.walltime = os.environ.get("MENET_LSF_WALLTIME", "24:00")
 
     def submit(self, task: Dict[str, Any]) -> str:
+        task = dict(task)
+        prediction = task.get("intent") == "predict_trait"
+        use_gpu = not prediction or task.get("device") == "cuda"
+        queue = self.queue if use_gpu else os.environ.get("MENET_LSF_PREDICT_QUEUE", "cpu")
+        host = self.host if use_gpu else os.environ.get("MENET_LSF_PREDICT_HOST", "")
+        python = self.python if use_gpu else os.environ.get("MENET_LSF_PREDICT_PYTHON", self.python)
+        walltime = self.walltime if use_gpu else os.environ.get("MENET_LSF_PREDICT_WALLTIME", "01:00")
+        if prediction and not use_gpu:
+            task["device"] = "cpu"
         output_dir = Path(task["output_dir"]).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         task_file = output_dir / "task.json"
@@ -28,14 +38,21 @@ class LSFExecutor:
         job_name = f"menet_{task['task_id']}"
         core_root = self.service_root.parent / "MENET"
         command = (
-            f"cd {self.service_root}; export MENET_CORE_ROOT={core_root}; "
-            f"export PYTHONPATH={self.service_root}:{core_root}; "
-            f"exec {self.python} -m agent.lsf_worker --task-file {task_file} --database {self.database_path}"
+            f"cd {shlex.quote(str(self.service_root))} && export MENET_CORE_ROOT={shlex.quote(str(core_root))}; "
+            f"export PYTHONPATH={shlex.quote(f'{self.service_root}:{core_root}')}; "
+            f"exec {shlex.quote(python)} -m agent.lsf_worker --task-file {shlex.quote(str(task_file))}"
         )
+        arguments = ["bsub", "-q", queue, "-W", walltime, "-J", job_name,
+                     "-oo", str(stdout), "-eo", str(stderr)]
+        if host:
+            arguments.extend(["-m", host])
+        if use_gpu:
+            arguments.extend(["-gpu", "num=1"])
+        else:
+            arguments.extend(["-n", os.environ.get("MENET_LSF_PREDICT_CPUS", "4")])
+        arguments.append(command)
         result = subprocess.run(
-            ["bsub", "-q", self.queue, "-m", self.host, "-gpu", "num=1", "-W", self.walltime,
-             "-J", job_name, "-oo", str(stdout), "-eo", str(stderr), command],
-            capture_output=True, text=True, check=False,
+            arguments, capture_output=True, text=True, check=False, timeout=30,
         )
         if result.returncode != 0:
             raise LSFError((result.stderr or result.stdout).strip() or "bsub 提交失败")
@@ -54,10 +71,10 @@ class LSFExecutor:
             return None
 
     def status(self, job_id: str) -> Optional[str]:
-        result = subprocess.run(["bjobs", "-noheader", "-o", "stat", job_id], capture_output=True, text=True, check=False)
+        result = subprocess.run(["bjobs", "-noheader", "-o", "stat", job_id], capture_output=True, text=True, check=False, timeout=15)
         combined = f"{result.stdout}\n{result.stderr}".lower()
         if "not found" in combined:
-            return "DONE"
+            return "NOT_FOUND"
         if result.returncode != 0:
             return None
         value = result.stdout.strip().split()
