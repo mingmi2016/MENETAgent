@@ -1137,14 +1137,20 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
         metric_steps = [step.get("data", {}) for step in task["result"].get("steps", [])]
         metrics = next((item for item in reversed(metric_steps) if item.get("baselines") or item.get("baseline")), {})
         baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
-        labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+        labels = {"gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
         baseline_lines = []
         menet_r2 = metrics.get("test_r2")
         for method, baseline in baselines.items():
             if isinstance(baseline, dict) and "test_r2" in baseline:
                 value = float(baseline["test_r2"])
                 gain = float(menet_r2) - value if menet_r2 is not None else None
-                baseline_lines.append(f"{labels.get(method, method)} R²={value:.3f}" + (f"，MENET 差值 {gain:+.3f}" if gain is not None else ""))
+                details = [f"{labels.get(method, method)} R²={value:.3f}" + (f"，MENET 差值 {gain:+.3f}" if gain is not None else "")]
+                for key, label in (("test_pearson_r", "相关性 r"), ("test_rmse", "RMSE"), ("test_mae", "MAE")):
+                    if isinstance(baseline.get(key), (int, float)):
+                        details.append(f"{label}={baseline[key]:.3f}")
+                if isinstance(baseline.get("fit_and_test_seconds"), (int, float)):
+                    details.append(f"拟合与测试 {baseline['fit_and_test_seconds']:.1f} 秒")
+                baseline_lines.append("，".join(details))
             elif isinstance(baseline, dict) and baseline.get("status") == "unavailable":
                 baseline_lines.append(f"{labels.get(method, method)}当前不可用")
         if baseline_lines:
@@ -1152,7 +1158,7 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
             available = [(method, float(item["test_r2"])) for method, item in baselines.items() if isinstance(item, dict) and "test_r2" in item]
             if available and menet_r2 is not None:
                 best_method, best_r2 = max(available, key=lambda item: item[1])
-                labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+                labels = {"gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
                 if best_r2 > float(menet_r2) + 0.05:
                     answer += f"\n模型建议：当前单次数据划分下，建议优先使用{labels.get(best_method, best_method)}进行预测；MENET 可保留作对照，正式选择前建议重复验证。"
                 else:
@@ -1162,7 +1168,7 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
                                 if step.get("name") == "predict_trait"), {})
         prediction_selection = prediction_step.get("prediction_selection") or {}
         primary_method = prediction_selection.get("primary_method", "menet")
-        method_labels = {"menet": "MENET", "genomic_ridge": "基因组岭回归",
+        method_labels = {"menet": "MENET", "gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归",
                          "random_forest": "随机森林", "xgboost": "XGBoost"}
         metrics = model_selection["test_r2"]
         metric_text = f"；训练任务测试集 R² 为 {metrics:.3f}" if isinstance(metrics, (int, float)) else ""

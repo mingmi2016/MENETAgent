@@ -7,6 +7,9 @@ from sklearn.metrics import mean_absolute_error, r2_score
 import numpy as np
 import json
 import joblib
+import os
+from time import perf_counter
+from utils.gblup import GBLUPRegressor
 from pathlib import Path
 from utils.ig import ig_analysis
 
@@ -135,14 +138,39 @@ def _baseline_arrays(train_loader, test_loader):
 
 
 def _baseline_metrics(method, predictions, truths, train_count, test_count, **params):
+    predictions, truths = np.asarray(predictions), np.asarray(truths)
+    correlation = float(np.corrcoef(truths, predictions)[0, 1]) if (
+        len(truths) > 1 and np.std(truths) > 0 and np.std(predictions) > 0
+    ) else None
     return {
         "method": method,
         **params,
         "test_r2": float(r2_score(truths, predictions)),
         "test_mae": float(mean_absolute_error(truths, predictions)),
+        "test_rmse": float(np.sqrt(np.mean((truths - predictions)**2))),
+        "test_pearson_r": correlation,
         "train_sample_count": int(train_count),
         "test_sample_count": int(test_count),
     }
+
+
+def evaluate_gblup_baseline(train_loader, test_loader, model_path=None):
+    """Fit additive GBLUP; allele frequencies and REML use training data only."""
+    train_x, test_x, train_y, test_y = _baseline_arrays(train_loader, test_loader)
+    model = GBLUPRegressor(max_memory_bytes=int(os.environ.get("MENET_GBLUP_MAX_MEMORY_BYTES", 2 * 1024**3)))
+    model.fit(train_x, train_y)
+    predictions = model.predict(test_x)
+    if model_path:
+        joblib.dump(model, model_path)
+    return _baseline_metrics(
+        "gblup", predictions, test_y, len(train_y), len(test_y),
+        model_path=str(model_path) if model_path else None,
+        relationship="additive_unshrunk_train_frequencies", estimation="REML",
+        fixed_effects="intercept_only", genotype_encoding="minus_one_zero_one",
+        delta=model.delta_, genetic_variance=model.genetic_variance_,
+        residual_variance=model.residual_variance_, fit_status=model.fit_status_,
+        marker_count_used=int(model.active_markers_.sum()),
+    )
 
 
 def evaluate_ridge_baseline(train_loader, test_loader, alpha=1.0, model_path=None):
@@ -191,15 +219,26 @@ def evaluate_baselines(train_loader, test_loader, random_state=42, model_dir=Non
     if model_dir:
         model_dir.mkdir(parents=True, exist_ok=True)
     path = lambda name: model_dir / name if model_dir else None
-    return {
-        "genomic_ridge": evaluate_ridge_baseline(train_loader, test_loader, model_path=path("genomic_ridge_model.joblib")),
-        "random_forest": evaluate_random_forest_baseline(train_loader, test_loader, random_state,
-                                                          model_path=path("random_forest_model.joblib")),
-        "xgboost": evaluate_xgboost_baseline(train_loader, test_loader, random_state,
-                                              model_path=path("xgboost_model.joblib")),
+    results = {}
+    methods = {
+        "gblup": lambda: evaluate_gblup_baseline(train_loader, test_loader, model_path=path("gblup_model.joblib")),
+        "genomic_ridge": lambda: evaluate_ridge_baseline(train_loader, test_loader, model_path=path("genomic_ridge_model.joblib")),
+        "random_forest": lambda: evaluate_random_forest_baseline(train_loader, test_loader, random_state,
+                                                                model_path=path("random_forest_model.joblib")),
+        "xgboost": lambda: evaluate_xgboost_baseline(train_loader, test_loader, random_state,
+                                                    model_path=path("xgboost_model.joblib")),
     }
+    for method, evaluate in methods.items():
+        started = perf_counter()
+        try:
+            results[method] = evaluate()
+        except Exception as exc:
+            results[method] = {"method": method, "status": "unavailable", "error": str(exc)}
+        results[method]["fit_and_test_seconds"] = perf_counter() - started
+    return results
 
 def train_menet(config, model, train_loader, val_loader, test_loader, criterion, tensor_for_ig, windows=None):
+    training_started = perf_counter()
     device, optimizer, scheduler = setup_training_env(config, model, criterion)
     best_val_r2=float('-inf')
     best_model = copy.deepcopy(model)
@@ -235,12 +274,18 @@ def train_menet(config, model, train_loader, val_loader, test_loader, criterion,
     _, _, predictions, truths = evaluate_menet(best_model, test_loader, criterion, device)
     np.savetxt(predictions_path, np.column_stack((truths, predictions)), delimiter=",",
                header="true,predicted", comments="")
+    menet_seconds = perf_counter() - training_started
+    extra_metrics = _baseline_metrics("menet", predictions, truths,
+                                     len(train_loader.dataset), len(test_loader.dataset))
     try:
         baselines = evaluate_baselines(train_loader, test_loader, model_dir=output_dir)
     except Exception as exc:
         baselines = {"status": "failed", "error": str(exc)}
     ridge = baselines.get("genomic_ridge", {}) if isinstance(baselines, dict) else {}
     metrics = {"test_loss": float(test_loss), "test_r2": float(test_r2),
+               "test_mae": extra_metrics["test_mae"], "test_rmse": extra_metrics["test_rmse"],
+               "test_pearson_r": extra_metrics["test_pearson_r"], "menet_fit_and_test_seconds": menet_seconds,
+               "timing_scope": "MENET 主模型训练/评估，不含编码器与相关性阶段；基线计时含拟合和测试预测",
                "baseline": ridge,
                "baselines": baselines,
                "r2_gain_vs_baseline": (
