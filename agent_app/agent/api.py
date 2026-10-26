@@ -40,8 +40,9 @@ from .tools import MenetTools
 
 LSF_TASK_INTENTS = {
     TaskIntent.TRAIN_MODEL,
+    TaskIntent.PREDICT_TRAIT,
 }
-LSF_TERMINAL_STATUSES = {"DONE", "EXIT", "ZOMBI"}
+LSF_TERMINAL_STATUSES = {"DONE", "EXIT", "ZOMBI", "NOT_FOUND"}
 
 
 class TaskRequest(BaseModel):
@@ -889,6 +890,9 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
     store.add_message(conversation_id, "user", request.message)
     model_query = parsed.intent == TaskIntent.LIST_MODELS
     if model_query:
+        _sync_pending_lsf_tasks()
+        # Repair completed training assets before presenting the model list.
+        store.backfill_models()
         explicit_query_trait = IntentParser._extract_trait(request.message)
         query_trait = explicit_query_trait or request.trait or state.get("active_trait") or (dataset or {}).get("trait")
         target_dataset_id = (dataset or {}).get("dataset_id")
@@ -1188,14 +1192,20 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
         metric_steps = [step.get("data", {}) for step in task["result"].get("steps", [])]
         metrics = next((item for item in reversed(metric_steps) if item.get("baselines") or item.get("baseline")), {})
         baselines = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
-        labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+        labels = {"gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
         baseline_lines = []
         menet_r2 = metrics.get("test_r2")
         for method, baseline in baselines.items():
             if isinstance(baseline, dict) and "test_r2" in baseline:
                 value = float(baseline["test_r2"])
                 gain = float(menet_r2) - value if menet_r2 is not None else None
-                baseline_lines.append(f"{labels.get(method, method)} R²={value:.3f}" + (f"，MENET 差值 {gain:+.3f}" if gain is not None else ""))
+                details = [f"{labels.get(method, method)} R²={value:.3f}" + (f"，MENET 差值 {gain:+.3f}" if gain is not None else "")]
+                for key, label in (("test_pearson_r", "相关性 r"), ("test_rmse", "RMSE"), ("test_mae", "MAE")):
+                    if isinstance(baseline.get(key), (int, float)):
+                        details.append(f"{label}={baseline[key]:.3f}")
+                if isinstance(baseline.get("fit_and_test_seconds"), (int, float)):
+                    details.append(f"拟合与测试 {baseline['fit_and_test_seconds']:.1f} 秒")
+                baseline_lines.append("，".join(details))
             elif isinstance(baseline, dict) and baseline.get("status") == "unavailable":
                 baseline_lines.append(f"{labels.get(method, method)}当前不可用")
         if baseline_lines:
@@ -1203,7 +1213,7 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
             available = [(method, float(item["test_r2"])) for method, item in baselines.items() if isinstance(item, dict) and "test_r2" in item]
             if available and menet_r2 is not None:
                 best_method, best_r2 = max(available, key=lambda item: item[1])
-                labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+                labels = {"gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
                 if best_r2 > float(menet_r2) + 0.05:
                     answer += f"\n模型建议：当前单次数据划分下，建议优先使用{labels.get(best_method, best_method)}进行预测；MENET 可保留作对照，正式选择前建议重复验证。"
                 else:
@@ -1213,7 +1223,7 @@ def explain_task(task_id: str, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]
                                 if step.get("name") == "predict_trait"), {})
         prediction_selection = prediction_step.get("prediction_selection") or {}
         primary_method = prediction_selection.get("primary_method", "menet")
-        method_labels = {"menet": "MENET", "genomic_ridge": "基因组岭回归",
+        method_labels = {"menet": "MENET", "gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归",
                          "random_forest": "随机森林", "xgboost": "XGBoost"}
         metrics = model_selection["test_r2"]
         metric_text = f"；训练任务测试集 R² 为 {metrics:.3f}" if isinstance(metrics, (int, float)) else ""
@@ -1288,6 +1298,39 @@ def _submit_task(task: MenetTask) -> None:
             store.update(task.task_id, "failed", {"task_id": task.task_id, "status": "failed", "errors": [f"Celery任务提交失败: {exc}"]})
             return
     executor.submit(run_task, task.to_dict(), str(store.path))
+
+
+def _sync_lsf_task(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    task = record["task"]
+    output_dir = Path(task.get("output_dir", ""))
+    result_path = output_dir / "result.json"
+    status_path = output_dir / "worker_status.json"
+    if status_path.is_file():
+        try:
+            store.import_worker_status(record["task_id"], json.loads(status_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            pass
+    if result_path.is_file():
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if result.get("status") in {"completed", "failed", "cancelled"}:
+                return store.finalize_task(task, result) and store.get(record["task_id"], record["user_id"])
+        except (OSError, ValueError, TypeError):
+            pass
+    return store.get(record["task_id"], record["user_id"])
+
+
+def _sync_pending_lsf_tasks() -> None:
+    """Import compute-node result files before serving task/model queries."""
+    if os.environ.get("MENET_QUEUE_BACKEND", "thread").lower() != "lsf":
+        return
+    lsf = LSFExecutor(service_root, str(store.path))
+    for record in store.pending_lsf_tasks():
+        job_id = lsf.job_id(record["task"].get("output_dir", ""))
+        if job_id:
+            _sync_lsf_terminal_state(record, lsf.status(job_id) or "RUN")
+        else:
+            _sync_lsf_task(record)
 
 
 def _validate_paths(dataset_dir: str, output_dir: str) -> None:
@@ -1389,23 +1432,30 @@ def _load_lsf_result(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[s
                 pass
         return result
     if lsf_status in {"EXIT", "ZOMBI"}:
-        return {
+        result = {
             "task_id": record["task_id"],
             "status": "failed",
             "errors": ["LSF 作业已结束但未写入结果，请查看 lsf.stderr。"],
             "warnings": [],
         }
+        store.finalize_task(record["task"], result)
+        return store.get(record["task_id"], record["user_id"])
     return None
 
 
 def _sync_lsf_terminal_state(record: Dict[str, Any], lsf_status: str) -> Optional[Dict[str, Any]]:
-    if record["status"] in {"completed", "failed", "cancelled"}:
-        return record
+    refreshed = _sync_lsf_task(record)
+    if refreshed and refreshed["status"] in {"completed", "failed", "cancelled"}:
+        return refreshed
+    if refreshed and lsf_status in {"PEND", "RUN", "SSUSP", "USUSP"}:
+        return refreshed
     result = _load_lsf_result(record, lsf_status)
     if result is None:
         return None
-    store.update(record["task_id"], result.get("status", "completed"), result)
-    return store.get(record["task_id"], record["user_id"])
+    if result.get("status") in {"completed", "failed", "cancelled"}:
+        store.finalize_task(record["task"], result)
+        return store.get(record["task_id"], record["user_id"])
+    return record
 
 
 def _with_runtime(record: Dict[str, Any]) -> Dict[str, Any]:

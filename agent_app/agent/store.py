@@ -282,6 +282,10 @@ class TaskStore:
         } for row in rows]
 
     def register_model(self, task: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+        with self._connect() as connection:
+            return self._register_model(connection, task, result)
+
+    def _register_model(self, connection: sqlite3.Connection, task: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
         output_dir = Path(task["output_dir"])
         if not (output_dir / "menet_model.pt").is_file():
             raise ValueError("训练任务没有生成 MENET 模型文件")
@@ -301,20 +305,73 @@ class TaskStore:
         epochs = task.get("epochs") or (task.get("metadata", {}).get("training_config", {}) or {}).get("epochs") or "默认"
         short_id = task["task_id"].removeprefix("task_")[:6]
         default_name = f"{task['trait']}_{now[:10]}_{epochs}轮_{short_id}"
+        connection.execute(
+            "INSERT INTO trained_models(model_id,task_id,user_id,name,trait,dataset_id,dataset_dir,output_dir,"
+            "metrics_json,sample_count,snp_count,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(task_id) DO UPDATE SET metrics_json=excluded.metrics_json,sample_count=excluded.sample_count,"
+            "snp_count=excluded.snp_count,updated_at=excluded.updated_at",
+            (
+                model_id, task["task_id"], task.get("owner_user_id", DEFAULT_USER_ID), default_name,
+                task["trait"], task.get("metadata", {}).get("dataset_id", ""), task["dataset_dir"],
+                task["output_dir"], json.dumps(metrics, ensure_ascii=False),
+                validation.get("matched_sample_count"), validation.get("snp_count"), "active", now, now,
+            ),
+        )
+        row = connection.execute("SELECT * FROM trained_models WHERE model_id=?", (model_id,)).fetchone()
+        return self._model_record(row)
+
+    def finalize_task(self, task: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+        """Commit final status, dataset statistics and model registration together on login."""
+        if result.get("task_id") != task["task_id"]:
+            raise ValueError("结果 task_id 与任务不匹配")
+        status = result.get("status")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("结果不是终态")
+        result = dict(result)
+        validation = next((step.get("data", {}) for step in result.get("steps", [])
+                           if step.get("name") == "validate_dataset"), {})
+        now = self._now()
+        timing = result.get("worker_timing") or {}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT user_id FROM tasks WHERE task_id=?", (task["task_id"],)).fetchone()
+            if row is None or row["user_id"] != task.get("owner_user_id", DEFAULT_USER_ID):
+                raise ValueError("任务不存在或所有者不匹配")
+            if validation.get("matched_sample_count") is not None and validation.get("snp_count") is not None:
+                connection.execute(
+                    "UPDATE datasets SET sample_count=?,snp_count=? WHERE dataset_dir=? AND user_id=?",
+                    (validation["matched_sample_count"], validation["snp_count"], task["dataset_dir"], row["user_id"]),
+                )
+            if status == "completed" and task.get("intent") == "train_model":
+                result["model"] = self._register_model(connection, task, result)
+            connection.execute(
+                "UPDATE tasks SET status=?,result_json=?,updated_at=?,started_at=COALESCE(started_at,?),"
+                "finished_at=COALESCE(finished_at,?) WHERE task_id=?",
+                (status, json.dumps(result, ensure_ascii=False), now, timing.get("started_at"),
+                 timing.get("finished_at") or now, task["task_id"]),
+            )
+        return result
+
+    def pending_lsf_tasks(self) -> list:
+        """All active cluster tasks, not only the last UI page."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT task_id FROM tasks WHERE status NOT IN ('completed','failed','cancelled')"
+            ).fetchall()
+        return [record for row in rows if (record := self.get(row[0])) is not None
+                and (Path(record["task"]["output_dir"]) / ".lsf_job_id").is_file()]
+
+    def import_worker_status(self, task_id: str, status: Dict[str, Any]) -> None:
+        allowed = {"running", "validating", "preparing", "training_encoder", "building_relatedness",
+                   "training_menet", "evaluating", "explaining"}
+        if status.get("task_id") != task_id or status.get("status") not in allowed:
+            return
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO trained_models(model_id,task_id,user_id,name,trait,dataset_id,dataset_dir,output_dir,"
-                "metrics_json,sample_count,snp_count,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(task_id) DO UPDATE SET metrics_json=excluded.metrics_json,sample_count=excluded.sample_count,"
-                "snp_count=excluded.snp_count,updated_at=excluded.updated_at",
-                (
-                    model_id, task["task_id"], task.get("owner_user_id", DEFAULT_USER_ID), default_name,
-                    task["trait"], task.get("metadata", {}).get("dataset_id", ""), task["dataset_dir"],
-                    task["output_dir"], json.dumps(metrics, ensure_ascii=False),
-                    validation.get("matched_sample_count"), validation.get("snp_count"), "active", now, now,
-                ),
+                "UPDATE tasks SET status=?,updated_at=?,started_at=COALESCE(started_at,?) "
+                "WHERE task_id=? AND status NOT IN ('completed','failed','cancelled')",
+                (status["status"], self._now(), status.get("started_at"), task_id),
             )
-        return self.get_model(model_id, task.get("owner_user_id", DEFAULT_USER_ID)) or {"model_id": model_id}
 
     def get_model(self, model_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         query = "SELECT * FROM trained_models WHERE model_id=?"
@@ -581,13 +638,18 @@ class TaskStore:
             "errors": ["服务在任务执行期间重启，任务未自动恢复；请重新提交"],
         }
         with self._connect() as connection:
-            cursor = connection.execute(
+            rows = connection.execute(
+                "SELECT task_id,task_json FROM tasks WHERE status IN ('running','validating','preparing',"
+                "'training_encoder','building_relatedness','training_menet','evaluating','explaining')"
+            ).fetchall()
+            local_ids = [row["task_id"] for row in rows if not
+                         (Path(json.loads(row["task_json"])["output_dir"]) / ".lsf_job_id").is_file()]
+            connection.executemany(
                 "UPDATE tasks SET status='failed', result_json=?, updated_at=? "
-                "WHERE status IN ('running','validating','preparing','training_encoder',"
-                "'building_relatedness','training_menet','evaluating','explaining')",
-                (json.dumps(result, ensure_ascii=False), self._now()),
+                "WHERE task_id=?",
+                [(json.dumps(result, ensure_ascii=False), self._now(), task_id) for task_id in local_ids],
             )
-        return cursor.rowcount
+        return len(local_ids)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)

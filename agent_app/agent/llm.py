@@ -292,7 +292,7 @@ class ResultInterpreter:
         system_prompt = (
             "你是 MENET 模型选择助手。根据输入的真实结构化评估证据提出预测模型建议。"
             "必须只返回 JSON："
-            '{"recommended_method":"menet|genomic_ridge|random_forest|xgboost",'
+            '{"recommended_method":"menet|gblup|genomic_ridge|random_forest|xgboost",'
             '"reference_method":"menet", "confidence":"high|moderate|low",'
             '"reason":"中文理由", "requires_repeat_validation":true}。'
             "只能选择 metrics 中存在且有 test_r2 的方法；不能修改或编造任何数值。"
@@ -463,7 +463,7 @@ class ResultInterpreter:
             metrics = next((step.get("data", {}) for step in reversed(steps) if step.get("data", {}).get("test_r2") is not None), {})
             if metrics:
                 baseline_data = metrics.get("baselines") or ({"genomic_ridge": metrics.get("baseline")} if metrics.get("baseline") else {})
-                labels = {"genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
+                labels = {"gblup": "GBLUP（加性基因组预测）", "genomic_ridge": "基因组岭回归", "random_forest": "随机森林", "xgboost": "XGBoost"}
                 comparisons = []
                 for method, baseline in baseline_data.items():
                     if isinstance(baseline, dict) and "test_r2" in baseline:

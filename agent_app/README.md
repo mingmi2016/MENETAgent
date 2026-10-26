@@ -69,6 +69,18 @@ For the local stdio MCP mode, there is no login, conversation history, user memo
 
 MENET model definitions and training mathematics belong in `../MENET`. Application concerns such as HTTP, SQLite, uploads, task state and web rendering belong here.
 
+## GBLUP breeding baseline
+
+New training runs compare MENET with additive GBLUP, genomic ridge, random forest and optional XGBoost on the same training/test split. Existing historical metrics are not silently recalculated. GBLUP is a separate implementation, not a renamed fixed-alpha ridge model.
+
+GBLUP uses a single-trait mixed model with an intercept, an unshrunk additive relationship matrix, and REML variance-ratio estimation from training phenotypes only. Allele frequencies and removal of monomorphic markers are fitted on training genotypes; new samples reuse that transformation. It accepts the application's `[-1, 1]` dosage coding, saves `gblup_model.joblib`, and can be used by the prediction method selector. It does not implement pedigree BLUP, ssGBLUP, environmental fixed effects or multi-trait evaluation; phenotype predictions must not be described as independently validated breeding values.
+
+Reference: [rrBLUP author documentation, A.mat and mixed.solve](https://jendelman.r-universe.dev/rrBLUP/doc/manual.html). This Python implementation follows the documented model formulation, but is not an invocation of the R package.
+
+Reports include test R², Pearson correlation, RMSE, MAE, and baseline fit/test time. MENET main-model time excludes encoder/relatedness stages, so it is not its full pipeline cost. Correlation is unavailable for constant vectors. The default GBLUP estimated working-memory limit is 2 GiB (`MENET_GBLUP_MAX_MEMORY_BYTES`); large relationship-matrix decompositions can still be slow, and the estimate is not a hard process-memory limit. If the estimate is exceeded, coding is unsupported or fitting fails, the comparison explicitly reports GBLUP unavailable rather than silently downsampling or aborting other baselines. REML boundary estimates are recorded and require cautious interpretation. This limit is inherited from the environment of the compute worker, not automatically copied from a login-only `.env`.
+
+GBLUP retains the common upstream data preparation of the current workflow; the training-only frequency estimation does not by itself remove any leakage introduced by upstream processing or random splits. Use repeated, kinship-aware or environment-aware validation appropriate to the intended breeding application before declaring a method superior. No test-set-driven hyperparameter search is added here.
+
 ## Configuration
 
 The Web UI contains an **AI Model** settings panel. It can discover models, persist the selected endpoint under `runs/llm-settings.json`, and test a real JSON response. Two model roles are supported: the intent model handles request classification and parameter extraction, while the analysis model explains MENET results. Ollama does not require an API key. OpenAI-compatible, Anthropic-compatible, and mixed third-party endpoints can be configured; API keys are never returned by the settings API and the local settings file is mode `0600`.
@@ -111,6 +123,10 @@ MENET_LSF_PYTHON=/data/user_home/xtcgroup/huawei/envs/torch_gpu/bin/python
 MENET_LSF_QUEUE=gpu
 MENET_LSF_HOST=gpu01
 MENET_LSF_WALLTIME=24:00
+MENET_LSF_PREDICT_QUEUE=cpu
+MENET_LSF_PREDICT_HOST=
+MENET_LSF_PREDICT_WALLTIME=01:00
+MENET_LSF_PREDICT_CPUS=4
 ```
 
 The backend settings are backward-compatible:
@@ -119,7 +135,7 @@ The backend settings are backward-compatible:
 - `MENET_QUEUE_BACKEND=celery` keeps the existing Redis/Celery path.
 - `MENET_QUEUE_BACKEND=lsf` submits `bsub -q gpu -m gpu01 -gpu "num=1"` jobs and uses `bjobs`/`bkill` for status and cancellation.
 
-The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time. With `MENET_QUEUE_BACKEND=lsf`, only `train_model` is submitted to LSF on `gpu01`. Data inspection, model listing, prediction, evaluation, and explanation run in the login-node Web process. The login environment therefore needs CPU PyTorch for ordinary prediction, while the `torch_gpu` environment is reserved for training. The local workstation and cluster use the same code with different `.env` files.
+The backend is configuration-driven rather than automatically inferred from the machine. The service reads `MENET_QUEUE_BACKEND` at task submission time. With `MENET_QUEUE_BACKEND=lsf`, training is submitted to the GPU queue on `gpu01`, while prediction defaults to the CPU queue without a GPU request. Data inspection, model listing, evaluation, and explanation run in the login-node Web process. LSF workers write only progress, artifacts and `result.json`; the login service imports results and performs all database updates and model registration. The local workstation and cluster use the same code with different `.env` files.
 Start the Web service from the login node:
 
 ```bash
@@ -136,7 +152,7 @@ The current deployment is functional, but the following work should be completed
 
 1. Enable and verify authentication. Set `MENET_AUTH_MODE=required` on the server, create an administrator account, and verify that users cannot read or modify another user's tasks, datasets, models, or artifacts. For HTTPS, also set `MENET_COOKIE_SECURE=1`.
 2. Reconcile LSF state after service restarts. On startup, inspect `.lsf_job_id` with `bjobs` instead of immediately marking an active task as failed. Keep `PEND` and `RUN` tasks alive, import `result.json` for `DONE`, and mark `EXIT` or `ZOMBI` jobs as failed.
-3. Add an end-to-end LSF smoke test covering submission, `PEND`/`RUN` status, GPU completion, result loading, model registration, cancellation, and the rule that only `train_model` uses LSF.
+3. Add an end-to-end LSF smoke test covering submission, `PEND`/`RUN` status, GPU training, CPU prediction, result loading, model registration, cancellation, and login-only database writes.
 4. Harden LSF submission and logging. Prefer a fixed worker script with `task.json` arguments over shell command construction, and record command failures, timeouts, `bsub`, `bjobs`, and `bkill` output.
 5. Serialize repeated validation runs or enforce a concurrency limit so repeated GPU training does not exhaust the allocated GPU memory.
 6. Run the Web service under a restart policy with log rotation and health checks instead of relying only on `nohup`.

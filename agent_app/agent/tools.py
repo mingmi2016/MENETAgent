@@ -359,7 +359,7 @@ class MenetTools:
             menet_predictions = menet_predictions.flatten().cpu().numpy()
             metrics = json.loads((source_dir / "metrics.json").read_text(encoding="utf-8"))
             selection = task.metadata.get("prediction_selection") or self._select_prediction_method(metrics)
-            if selection.get("primary_method") not in {"menet", "genomic_ridge", "random_forest", "xgboost"}:
+            if selection.get("primary_method") not in {"menet", "gblup", "genomic_ridge", "random_forest", "xgboost"}:
                 selection = self._select_prediction_method(metrics)
             if selection.get("primary_method") != "menet":
                 selected_metrics = metrics.get("baselines", {}).get(selection["primary_method"], {})
@@ -430,7 +430,10 @@ class MenetTools:
         snapshot_path = source_dir / "training_config.json"
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.is_file() else {}
         seed = int(snapshot.get("training_seed", 42))
-        if method == "genomic_ridge":
+        if method == "gblup":
+            from utils.gblup import GBLUPRegressor
+            model = GBLUPRegressor()
+        elif method == "genomic_ridge":
             model = Ridge(alpha=1.0, solver="lsqr", max_iter=1000)
         elif method == "random_forest":
             model = RandomForestRegressor(n_estimators=300, random_state=seed, n_jobs=-1, max_features="sqrt")

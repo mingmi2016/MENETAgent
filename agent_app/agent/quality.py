@@ -45,7 +45,7 @@ def build_quality_report(task: MenetTask, result: Dict[str, Any]) -> Dict[str, A
         if comparisons:
             level = "pass" if any("差值 +" in item and not item.endswith("+0.000") for item in comparisons) else "warning"
             checks.append(_check(
-                "baseline_comparison", level, "与传统机器学习基线比较",
+                "baseline_comparison", level, "与育种统计及机器学习基线比较",
                 "；".join(comparisons) + "。",
                 "结合相同测试集、重复划分和样本规模判断模型差异，不将单次提升视为显著性结论。",
             ))
