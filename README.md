@@ -87,3 +87,11 @@ Completed training runs are registered in the local model library. Users can ins
 - [Usability checklist](agent_app/docs/Usability-Checklist.md)
 
 The current profile selector is for local development and is not authentication. Add verified accounts, HTTPS, authorization, quotas, and production storage before exposing the service outside the local machine.
+
+## Research Direction: Cross-Dataset Robustness
+
+The planned scientific direction is **robust MENET training and automatic configuration across datasets**. The goal is to reduce manual tuning on related crop, trait and multi-environment datasets, while using repeated validation to identify when MENET is suitable and when XGBoost, random forest or genomic ridge is more reliable.
+
+This direction requires more than a UI or LLM wrapper. It will use unified preprocessing, dataset suitability checks, stable default configurations, early stopping, controlled candidate search, multiple random seeds, fair baseline comparisons and complete experiment records. Final hyperparameters must be selected with training/validation data or cross-validation; the test set is evaluated once after the configuration is locked.
+
+The research roadmap and paper scope are documented in [MENET-Agent-Design.md](docs/MENET-Agent-Design.md#92-menet-跨数据集稳健性与自动配置研究方向). The intended claim is reduced tuning cost and improved cross-dataset stability, rather than a guarantee that MENET is always the best model.

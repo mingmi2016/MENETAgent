@@ -1223,7 +1223,8 @@ function confirmLongTask(text) {
   }
   if (!/(训练|报告|train|report)/i.test(text)) return Promise.resolve(true);
   const selected = $("dataset-select").selectedOptions[0];
-  $("confirm-summary").textContent = `${selected?.textContent || "当前数据"}；性状 ${activeTrait || "未指定"}。`;
+  $("confirm-summary").textContent =
+    `${selected?.textContent || "当前数据"}；数据集 ID ${selected?.value || "未选择"}；性状 ${activeTrait || "未指定"}。`;
   const dialog = $("task-confirm");
   dialog.showModal();
   return new Promise((resolve) => {
@@ -1266,12 +1267,23 @@ $("chat-form").addEventListener("submit", async (event) => {
         message: text,
         user_id: currentUserId,
         dataset_id: $("dataset-select").value,
+        trait: activeTrait || null,
         conversation_id: conversationId,
         prediction_genotype_path: predictionGenotypePath || null,
         model_id: selectedModelId || null,
       }),
     });
     if (data.task_id) {
+      const submittedDatasetId = data.dataset?.dataset_id || "";
+      const selectedDatasetId = $("dataset-select").value;
+      if (submittedDatasetId && submittedDatasetId !== selectedDatasetId) {
+        try {
+          await request(`/api/v1/tasks/${encodeURIComponent(data.task_id)}/cancel?${userQuery()}`, { method: "POST" });
+        } catch (_) {
+          // The mismatch remains visible even if the queue has already completed.
+        }
+        throw new Error(`任务数据集不一致：页面选择 ${selectedDatasetId}，服务端提交 ${submittedDatasetId}。系统已请求取消任务，请联系管理员检查。`);
+      }
       activeTaskId = data.task_id;
       localStorage.setItem(taskKey(), activeTaskId);
       makeTaskMessage(activeTaskId);

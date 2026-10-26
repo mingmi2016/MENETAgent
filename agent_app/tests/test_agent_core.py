@@ -540,7 +540,7 @@ def test_dataset_resolution_prefers_named_environment_over_species_fallback(tmp_
     assert selected["dataset_id"] == "wheat_env1"
 
 
-def test_dataset_resolution_prefers_explicit_trait_over_active_dataset(tmp_path, monkeypatch):
+def test_dataset_resolution_prefers_requested_dataset_over_trait_inference(tmp_path, monkeypatch):
     import agent.api as api
 
     store = TaskStore(str(tmp_path / "agent.db"))
@@ -560,7 +560,111 @@ def test_dataset_resolution_prefers_explicit_trait_over_active_dataset(tmp_path,
         {"active_dataset_id": "rice_flowering"},
         trait="plant_height",
     )
-    assert selected["dataset_id"] == "rice_height"
+    assert selected["dataset_id"] == "rice_flowering"
+
+
+def test_dataset_resolution_keeps_ui_selection_when_trait_exists_in_multiple_datasets(tmp_path, monkeypatch):
+    import agent.api as api
+
+    task_store = TaskStore(str(tmp_path / "agent.db"))
+    user = task_store.create_user("Researcher")
+    old_dataset = dataset_record("maize_old", user["user_id"], "Zea_mays_maize8652", "maize", tmp_path)
+    selected_dataset = dataset_record("maize_gstp004", user["user_id"], "Zea_mays_GSTP004", "maize", tmp_path)
+    old_dataset["trait"] = "EW"
+    selected_dataset["trait"] = "EW"
+    task_store.create_dataset(old_dataset)
+    task_store.create_dataset(selected_dataset)
+    monkeypatch.setattr(api, "store", task_store)
+
+    selected = _resolve_dataset(
+        "请训练模型，性状为 EW，使用 GPU",
+        user["user_id"],
+        selected_dataset["dataset_id"],
+        {"active_dataset_id": old_dataset["dataset_id"]},
+        trait="EW",
+    )
+
+    assert selected["dataset_id"] == selected_dataset["dataset_id"]
+
+
+def test_chat_training_task_uses_ui_selected_dataset_for_ambiguous_trait(tmp_path, monkeypatch):
+    import agent.api as api
+
+    task_store = TaskStore(str(tmp_path / "agent.db"))
+    user = task_store.create_user("Researcher")
+    old_dataset = dataset_record("maize_old", user["user_id"], "Zea_mays_maize8652", "maize", tmp_path)
+    selected_dataset = dataset_record("maize_gstp004", user["user_id"], "Zea_mays_GSTP004", "maize", tmp_path)
+    old_dataset["trait"] = "EW"
+    selected_dataset["trait"] = "EW"
+    task_store.create_dataset(old_dataset)
+    task_store.create_dataset(selected_dataset)
+    conversation = task_store.ensure_conversation(user_id=user["user_id"])
+    task_store.update_conversation(
+        conversation["conversation_id"],
+        {"active_dataset_id": old_dataset["dataset_id"], "active_dataset_dir": old_dataset["dataset_dir"]},
+        user["user_id"],
+    )
+
+    monkeypatch.setattr(api, "store", task_store)
+    monkeypatch.setattr(api, "service_root", tmp_path)
+    monkeypatch.setattr(api, "intent_parser", IntentParser())
+    monkeypatch.setattr(api, "_submit_task", lambda task: None)
+
+    response = api.chat(ChatRequest(
+        message="请训练模型，性状为 EW，使用 GPU",
+        user_id=user["user_id"],
+        dataset_id=selected_dataset["dataset_id"],
+        conversation_id=conversation["conversation_id"],
+    ))
+
+    saved_task = task_store.get(response["task_id"], user["user_id"])["task"]
+    assert saved_task["metadata"]["dataset_id"] == selected_dataset["dataset_id"]
+    assert saved_task["dataset_dir"] == selected_dataset["dataset_dir"]
+    assert response["dataset"]["dataset_id"] == selected_dataset["dataset_id"]
+
+
+def test_model_inventory_reports_dataset_total_and_filters_current_trait(tmp_path, monkeypatch):
+    import agent.api as api
+
+    task_store = TaskStore(str(tmp_path / "agent.db"))
+    user = task_store.create_user("Researcher")
+    dataset = dataset_record("maize_gstp004", user["user_id"], "Zea_mays_GSTP004", "maize", tmp_path)
+    dataset["trait"] = "EW"
+    task_store.create_dataset(dataset)
+    conversation = task_store.ensure_conversation(user_id=user["user_id"])
+
+    for trait in ("LBT", "CW"):
+        output = tmp_path / "runs" / trait
+        output.mkdir(parents=True)
+        (output / "menet_model.pt").write_bytes(b"model")
+        training = MenetTask(
+            trait=trait,
+            owner_user_id=user["user_id"],
+            dataset_dir=dataset["dataset_dir"],
+            output_dir=str(output),
+            intent=TaskIntent.TRAIN_MODEL,
+            metadata={"dataset_id": dataset["dataset_id"]},
+        )
+        task_store.create(training.to_dict())
+        result = {"status": "completed", "steps": []}
+        task_store.update(training.task_id, "completed", result)
+        task_store.register_model(training.to_dict(), result)
+
+    monkeypatch.setattr(api, "store", task_store)
+    monkeypatch.setattr(api, "service_root", tmp_path)
+    monkeypatch.setattr(api, "intent_parser", IntentParser())
+
+    response = api.chat(ChatRequest(
+        message="当前数据集有几个模型",
+        user_id=user["user_id"],
+        dataset_id=dataset["dataset_id"],
+        trait="EW",
+        conversation_id=conversation["conversation_id"],
+    ))
+
+    assert response["models"] == []
+    assert "数据集共有 2 个可用模型；当前性状 EW 有 0 个" in response["message"]
+    assert "其他性状模型：CW 1 个；LBT 1 个" in response["message"]
 
 
 def test_task_lookup_is_scoped_to_owner(tmp_path):

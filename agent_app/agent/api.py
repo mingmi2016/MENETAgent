@@ -65,6 +65,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     user_id: str = DEFAULT_USER_ID
     dataset_id: Optional[str] = None
+    trait: Optional[str] = None
     dataset_dir: Optional[str] = None
     output_dir: Optional[str] = None
     conversation_id: Optional[str] = None
@@ -874,31 +875,53 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
     parsed = intent_parser.parse(request.message)
     response_source = getattr(intent_parser, "last_source", response_source)
     dataset_reference = parsed.arguments.get("dataset_reference")
-    dataset = _resolve_dataset(request.message, request.user_id, request.dataset_id, state, dataset_reference, parsed.arguments.get("trait"))
+    dataset = _resolve_dataset(
+        request.message,
+        request.user_id,
+        request.dataset_id,
+        state,
+        dataset_reference,
+        parsed.arguments.get("trait") or request.trait,
+    )
     dataset_dir = (dataset or {}).get("dataset_dir") or request.dataset_dir or state.get("active_dataset_dir") or "data"
     output_base_dir = request.output_dir or state.get("active_output_base_dir") or "runs"
     _validate_paths(dataset_dir, output_base_dir)
     store.add_message(conversation_id, "user", request.message)
     model_query = parsed.intent == TaskIntent.LIST_MODELS
     if model_query:
-        query_trait = IntentParser._extract_trait(request.message) or (dataset or {}).get("trait")
+        explicit_query_trait = IntentParser._extract_trait(request.message)
+        query_trait = explicit_query_trait or request.trait or state.get("active_trait") or (dataset or {}).get("trait")
         target_dataset_id = (dataset or {}).get("dataset_id")
         target_dataset_dir = str(Path((dataset or {}).get("dataset_dir", "")).resolve()) if dataset else ""
-        models = [
+        dataset_models = [
             item for item in store.list_models(request.user_id)
             if target_dataset_id and (
                 item.get("dataset_id") == target_dataset_id
                 or str(Path(item.get("dataset_dir", "")).resolve()) == target_dataset_dir
             )
         ]
-        if query_trait:
-            models = [item for item in models if item.get("trait") == query_trait]
+        models = [item for item in dataset_models if item.get("trait") == query_trait] if query_trait else dataset_models
         dataset_label = (dataset or {}).get("name") or target_dataset_id or "当前数据集"
         if not models:
-            reply = f"当前数据集：{dataset_label}（{target_dataset_id or '未选择'}）\n"
-            reply += f"暂时没有已完成的{query_trait + ' ' if query_trait else ''}模型。请先在这个数据集上训练模型。"
+            lines = [
+                f"当前数据集：{dataset_label}（{target_dataset_id or '未选择'}）",
+                f"数据集共有 {len(dataset_models)} 个可用模型；当前性状 {query_trait or '未指定'} 有 0 个。",
+            ]
+            if dataset_models:
+                trait_counts: Dict[str, int] = {}
+                for model in dataset_models:
+                    model_trait = model.get("trait") or "未指定"
+                    trait_counts[model_trait] = trait_counts.get(model_trait, 0) + 1
+                lines.append("其他性状模型：" + "；".join(
+                    f"{trait_name} {count} 个" for trait_name, count in sorted(trait_counts.items())
+                ) + "。")
+            lines.append(f"请先在这个数据集上训练 {query_trait + ' ' if query_trait else ''}模型。")
+            reply = "\n".join(lines)
         else:
-            lines = [f"当前数据集：{dataset_label}（{target_dataset_id}）", f"共有 {len(models)} 个可用模型："]
+            lines = [
+                f"当前数据集：{dataset_label}（{target_dataset_id}）",
+                f"数据集共有 {len(dataset_models)} 个可用模型；当前性状 {query_trait} 有 {len(models)} 个：",
+            ]
             for index, model in enumerate(models, 1):
                 source = store.get(model["task_id"], request.user_id)
                 source_task = source["task"] if source else {}
@@ -911,11 +934,16 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         store.add_message(conversation_id, "assistant", reply)
         return {"type": "model_list", "conversation_id": conversation_id, "message": reply, "models": models, "response_source": response_source}
     requested_model_id = request.model_id or parsed.arguments.get("model_id")
-    if not requested_model_id and intent_parser.last_source.get("type") == "rules":
+    if not requested_model_id and response_source.get("type") == "rules":
         model_match = re.search(r"\b(model_[a-z0-9]+)\b", request.message.lower())
         requested_model_id = model_match.group(1) if model_match else None
     requested_model = store.get_model(requested_model_id, request.user_id) if requested_model_id else None
-    context_trait = (requested_model or {}).get("trait") or (dataset or {}).get("trait") or state.get("active_trait")
+    context_trait = (
+        (requested_model or {}).get("trait")
+        or request.trait
+        or state.get("active_trait")
+        or (dataset or {}).get("trait")
+    )
     if "trait" in parsed.missing_fields and context_trait:
         parsed.arguments["trait"] = context_trait
         parsed.missing_fields.remove("trait")
@@ -928,6 +956,25 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         store.add_message(conversation_id, "assistant", reply)
         return {"type": "needs_input", "conversation_id": conversation_id, "message": reply,
                 "parsed": parsed.to_dict(), "response_source": response_source}
+    if dataset and parsed.arguments.get("trait"):
+        available_traits = {
+            str(value).strip().lower()
+            for value in _public_dataset(dataset).get("available_traits", [])
+        }
+        requested_trait = str(parsed.arguments["trait"]).strip().lower()
+        if available_traits and requested_trait not in available_traits:
+            reply = (
+                f"当前选择的数据集 {dataset.get('name') or dataset['dataset_id']} "
+                f"不包含性状 {parsed.arguments['trait']}。请更换性状或明确切换数据集。"
+            )
+            store.add_message(conversation_id, "assistant", reply)
+            return {
+                "type": "needs_input",
+                "conversation_id": conversation_id,
+                "message": reply,
+                "parsed": parsed.to_dict(),
+                "response_source": response_source,
+            }
     if dataset and _requires_raw_preprocessing(dataset) and parsed.intent in {
         TaskIntent.INSPECT_DATA, TaskIntent.TRAIN_MODEL, TaskIntent.PREDICT_TRAIT,
         TaskIntent.EVALUATE_MODEL, TaskIntent.EXPLAIN_MODEL,
@@ -1039,7 +1086,15 @@ def chat(request: ChatRequest) -> Dict[str, Any]:
         conversation_update["recent_dataset_ids"] = recent[:10]
     store.update_conversation(conversation_id, conversation_update, request.user_id)
     _submit_task(task)
-    return {"type": "task_submitted", "conversation_id": conversation_id, "task_id": task.task_id, "output_dir": task.output_dir, "parsed": parsed.to_dict(), "response_source": response_source}
+    return {
+        "type": "task_submitted",
+        "conversation_id": conversation_id,
+        "task_id": task.task_id,
+        "output_dir": task.output_dir,
+        "dataset": _public_dataset(dataset) if dataset else None,
+        "parsed": parsed.to_dict(),
+        "response_source": response_source,
+    }
 
 
 @app.post("/api/v1/tasks", status_code=202)
@@ -1493,21 +1548,6 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
                 return item
     if any(word in text for word in ("上一个数据", "前一个数据", "之前的数据")) and len(recent) > 1:
         return by_id.get(recent[1])
-    # An explicit trait is stronger than the currently selected dataset.
-    explicit_trait = (trait or IntentParser._extract_trait(message) or "").strip().lower()
-    if explicit_trait:
-        trait_matches = [
-            item for item in datasets
-            if item.get("trait", "").strip().lower() == explicit_trait
-            or explicit_trait in {str(value).strip().lower() for value in _public_dataset(item).get("available_traits", [])}
-        ]
-        if len(trait_matches) == 1:
-            return trait_matches[0]
-        if len(trait_matches) > 1:
-            active = by_id.get(state.get("active_dataset_id"))
-            if active in trait_matches:
-                return active
-            return trait_matches[0]
     # A dataset explicitly named in the message or a relative-history request
     # takes precedence over the UI selection.
     for item in datasets:
@@ -1527,11 +1567,29 @@ def _resolve_dataset(message: str, user_id: str, requested_id: Optional[str], st
             match = next((item for item in datasets if species in item.get("species", "").lower()), None)
             if match:
                 return match
+    # The dataset picker is an explicit user selection. It must take
+    # precedence over trait inference because the same trait commonly exists
+    # in several datasets. The previous order could display GSTP004 while
+    # silently submitting training against a different EW dataset.
     if requested_id:
         dataset = by_id.get(requested_id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="数据集不存在或不属于当前用户")
         return dataset
+    explicit_trait = (trait or IntentParser._extract_trait(message) or "").strip().lower()
+    if explicit_trait:
+        trait_matches = [
+            item for item in datasets
+            if item.get("trait", "").strip().lower() == explicit_trait
+            or explicit_trait in {str(value).strip().lower() for value in _public_dataset(item).get("available_traits", [])}
+        ]
+        if len(trait_matches) == 1:
+            return trait_matches[0]
+        if len(trait_matches) > 1:
+            active = by_id.get(state.get("active_dataset_id"))
+            if active in trait_matches:
+                return active
+            return trait_matches[0]
     for item in datasets:
         trait = item.get("trait", "").lower()
         if trait and trait in text:
